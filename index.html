@@ -749,10 +749,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const off = weekday(`${st.year}-01-01`);
     return p[((g.sw - 1) * 7 + off + i) % p.length] === 'D' ? 'D' : 'T';
   }
-  /** Vacaciones: solo pisan días de trabajo (un franqueo dentro de vacaciones sigue siendo D). */
+  /** Vacaciones: solo pisan días de trabajo (un franqueo dentro de vacaciones sigue siendo D; un festivo dentro de vacaciones es FNR). */
   function overlay(st, g, base, iso) {
     if (base === 'D') return 'D';
     const v = (st.vac[key(g.col, g.letra)] || {})[iso];
+    if (v && st.festivos[iso]) return 'FNR'; // festivo dentro de vacaciones = FNR
     return v || 'T';
   }
   /**
@@ -1447,7 +1448,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     res.views = [{ state: 'frozen', ySplit: 4 }];
     const notas = ['Cómo se ha hecho',
       `· Objetivo por grupo: ${st.cfg.work} días de trabajo y ${st.cfg.rest} de descanso (franqueos + vacaciones + FNR).`,
-      '· Vacaciones y festivos solo sustituyen días de trabajo: un franqueo que cae en vacaciones sigue siendo D.',
+      '· Vacaciones y festivos solo sustituyen días de trabajo: un franqueo que cae en vacaciones sigue siendo D y un festivo que cae en vacaciones es FNR.',
       `· Máximo ${st.cfg.maxRun} días seguidos de trabajo y al menos ${st.cfg.min14} descansos en cada 14 días, contando el final del año anterior.`,
       '· Todo sale de la hoja Cuadrante: cambiar una letra allí la cambia en su pestaña y en este resumen.'];
     notas.forEach((t, k) => { const c = res.getCell(n + 6 + k, 1); c.value = t; c.font = font({ bold: k === 0, size: 9 }); });
