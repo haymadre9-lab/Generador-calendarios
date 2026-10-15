@@ -132,6 +132,9 @@ table.cal td button:hover b { outline: 2px solid var(--teal); outline-offset: -2
 .v-V b, .opts .v-V { background: var(--vV); }
 .v-FNR b, .opts .v-FNR { background: var(--vFNR); }
 .v-2V b, .opts .v-2V { background: var(--v2V); }
+.v-M b, .opts .v-M { background: #92D050; }
+table.cal.tur td button.v-T b, .opts.tur .v-T { background: #F8CBAD; }
+table.cal.tur td button.v-D b, .opts.tur .v-D { background: #E8332A; color: #fff; }
 table.cal td button.v-FNR b { font-size: 11.5px; }
 table.cal td button.man::after { content: ''; position: absolute; top: 12px; right: 0; border-style: solid; border-width: 0 9px 9px 0; border-color: transparent var(--bad) transparent transparent; }
 table.cal td button.fest i { background: var(--vFNR); color: #102; }
@@ -712,6 +715,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   const DAY = 86400000;
   const REST = new Set(['D', 'V', 'FNR', '2V']);
   const VALUES = ['T', 'D', 'V', '2V', 'FNR'];
+  const VALUES_TURNOS = ['M', 'T', 'D', 'V', '2V', 'FNR']; // colectivos con turnos (interinos): M mañana, T tarde
+  const ALLVALUES = ['M', 'T', 'D', 'V', '2V', 'FNR'];
+  const isW = (v) => v === 'T' || v === 'M'; // día de trabajo
 
   // ---------- fechas (todo en UTC, como cadenas ISO AAAA-MM-DD) ----------
   const isoOf = (t) => new Date(t).toISOString().slice(0, 10);
@@ -747,14 +753,15 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function baseValue(st, g, i) {
     const p = cyclePattern(st, g);
     const off = weekday(`${st.year}-01-01`);
-    return p[((g.sw - 1) * 7 + off + i) % p.length] === 'D' ? 'D' : 'T';
+    const ch = p[((g.sw - 1) * 7 + off + i) % p.length];
+    return ch === 'D' ? 'D' : ch === 'M' ? 'M' : 'T';
   }
   /** Vacaciones: solo pisan días de trabajo (un franqueo dentro de vacaciones sigue siendo D; un festivo dentro de vacaciones es FNR). */
   function overlay(st, g, base, iso) {
     if (base === 'D') return 'D';
     const v = (st.vac[key(g.col, g.letra)] || {})[iso];
     if (v && st.festivos[iso]) return 'FNR'; // festivo dentro de vacaciones = FNR
-    return v || 'T';
+    return v || base;
   }
   /**
    * Festivos (como en 2026): el franqueo que cae en festivo pasa a FNR; nunca hay D en festivo.
@@ -771,9 +778,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       let staffed = 0;
       for (const g of gs) {
         const k = key(g.col, g.letra), lk = (st.locked[k] || {})[iso];
-        if (lk) { if (lk === 'T') staffed += g.personas; if (lk === 'FNR') fnr.set(g, fnr.get(g) + 1); continue; }
+        if (lk) { if (isW(lk)) staffed += g.personas; if (lk === 'FNR') fnr.set(g, fnr.get(g) + 1); continue; }
         if (cal[k][i] === 'D') { cal[k][i] = 'FNR'; fnr.set(g, fnr.get(g) + 1); }
-        else if (cal[k][i] === 'T') free.push(g);
+        else if (isW(cal[k][i])) free.push(g);
       }
       if (pol === 'rot') return;
       if (pol === 'all') { for (const g of free) { cal[key(g.col, g.letra)][i] = 'FNR'; fnr.set(g, fnr.get(g) + 1); } return; }
@@ -803,7 +810,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     });
   }
   function prefixOf(st, g) {
-    return (st.cierre[key(g.col, g.letra)] || []).map((v) => (v === 'T' ? 'T' : 'D'));
+    return (st.cierre[key(g.col, g.letra)] || []).map((v) => (isW(v) ? 'T' : 'D'));
   }
   function isVacOrFest(st, g, iso) {
     return !!st.festivos[iso] || !!(st.vac[key(g.col, g.letra)] || {})[iso];
@@ -813,13 +820,13 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function localOk(st, seq, prefix, i) {
     const full = prefix.concat(seq), k = prefix.length + i;
     let left = 0, j = k - 1;
-    while (j >= 0 && full[j] === 'T') { left++; j--; }
+    while (j >= 0 && isW(full[j])) { left++; j--; }
     let right = 0; j = k + 1;
-    while (j < full.length && full[j] === 'T') { right++; j++; }
+    while (j < full.length && isW(full[j])) { right++; j++; }
     if (left + 1 + right > st.cfg.maxRun) return false;
     for (let a = Math.max(0, k - 13); a <= Math.min(k, full.length - 14); a++) {
       let r = 0;
-      for (let b = a; b < a + 14; b++) if (full[b] !== 'T') r++;
+      for (let b = a; b < a + 14; b++) if (!isW(full[b])) r++;
       if (r < st.cfg.min14) return false;
     }
     return true;
@@ -827,10 +834,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function startOk(st, seq, prefix) {
     const full = prefix.concat(seq), hi = Math.min(full.length, prefix.length + 28);
     let run = 0;
-    for (let k = 0; k < hi; k++) { run = full[k] === 'T' ? run + 1 : 0; if (run > st.cfg.maxRun) return false; }
+    for (let k = 0; k < hi; k++) { run = isW(full[k]) ? run + 1 : 0; if (run > st.cfg.maxRun) return false; }
     for (let a = 0; a + 14 <= hi; a++) {
       let r = 0;
-      for (let b = a; b < a + 14; b++) if (full[b] !== 'T') r++;
+      for (let b = a; b < a + 14; b++) if (!isW(full[b])) r++;
       if (r < st.cfg.min14) return false;
     }
     return true;
@@ -851,7 +858,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function adjust(st, col, gs, cal, changed, onlyKeys) {
     const days = yearDays(st.year), nec = st.nec[col] || {};
     const locked = (g) => st.locked[key(g.col, g.letra)] || {};
-    const avail = days.map((_, i) => gs.reduce((s, g) => s + (cal[key(g.col, g.letra)][i] === 'T' ? g.personas : 0), 0));
+    const avail = days.map((_, i) => gs.reduce((s, g) => s + (isW(cal[key(g.col, g.letra)][i]) ? g.personas : 0), 0));
     const deficit = (i) => (nec[days[i]] || 0) - avail[i];
     const target = st.cfg.rest;
     const work = onlyKeys ? gs.filter((g) => onlyKeys.has(key(g.col, g.letra))) : gs;
@@ -898,7 +905,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
           for (const [a, b] of blocks(seq)) {
             if (b - a + 1 > maxBlock) continue;
             for (const i of [a - 1, b + 1]) {
-              if (i >= 0 && i < seq.length && seq[i] === 'T' && !locked(g)[days[i]] && !st.festivos[days[i]] &&
+              if (i >= 0 && i < seq.length && isW(seq[i]) && !locked(g)[days[i]] && !st.festivos[days[i]] &&
                   !changed[k].some((j) => Math.abs(i - j) < spread)) {
                 const sc = -deficit(i);
                 if (!best || sc > best[0]) best = [sc, i];
@@ -926,7 +933,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       const k = key(g.col, g.letra), lk = st.locked[k] || {}, pre = prefixOf(st, g), seq = cal[k];
       if (!startOk(st, seq, pre)) {
         for (let i = 0; i < 10; i++) {
-          if (seq[i] === 'T' && !lk[days[i]]) {
+          if (isW(seq[i]) && !lk[days[i]]) {
             seq[i] = st.festivos[days[i]] ? 'FNR' : 'D'; changed[k].push(i);
             if (startOk(st, seq, pre)) break;
           }
@@ -953,22 +960,26 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   // ---------- validación ----------
   function validateGroup(st, g) {
     const k = key(g.col, g.letra), seq = st.cal[k] || [], days = yearDays(st.year), pre = prefixOf(st, g);
-    const counts = { T: 0, D: 0, V: 0, '2V': 0, FNR: 0 };
+    const counts = { M: 0, T: 0, D: 0, V: 0, '2V': 0, FNR: 0 };
     for (const x of seq) counts[x] = (counts[x] || 0) + 1;
-    const rest = seq.length - counts.T, issues = [];
+    const turnos = !!(colectivoInfo(st, g.col) || {}).turnos;
+    counts.W = counts.T + counts.M;
+    const rest = seq.length - counts.W, issues = [];
     const work = st.cfg.work;
-    if (counts.T !== work) issues.push(`Trabaja ${counts.T} días (objetivo ${work})`);
-    if (rest !== st.cfg.rest) issues.push(`${rest} días de descanso (objetivo ${st.cfg.rest})`);
+    if (!turnos) { // los colectivos con turnos (interinos) no tienen objetivo anual de días
+      if (counts.T !== work) issues.push(`Trabaja ${counts.T} días (objetivo ${work})`);
+      if (rest !== st.cfg.rest) issues.push(`${rest} días de descanso (objetivo ${st.cfg.rest})`);
+    }
     const full = pre.concat(seq);
     let run = 0, maxRun = 0, runs = [];
     for (let i = 0; i < full.length; i++) {
-      run = full[i] === 'T' ? run + 1 : 0;
+      run = isW(full[i]) ? run + 1 : 0;
       maxRun = Math.max(maxRun, run);
       if (run === st.cfg.maxRun + 1) runs.push(i);
     }
     for (const end of runs) {
-      let s = end; while (s > 0 && full[s - 1] === 'T') s--;
-      let e = end; while (e + 1 < full.length && full[e + 1] === 'T') e++;
+      let s = end; while (s > 0 && isW(full[s - 1])) s--;
+      let e = end; while (e + 1 < full.length && isW(full[e + 1])) e++;
       const a = s - pre.length, b = e - pre.length;
       const da = a < 0 ? addDays(days[0], a) : days[a];
       issues.push(`${e - s + 1} días seguidos de trabajo: ${fmt(da)} a ${fmt(days[b])}`);
@@ -977,7 +988,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const shown = new Set();
     for (let a = 0; a + 14 <= full.length; a++) {
       let r = 0;
-      for (let b = a; b < a + 14; b++) if (full[b] !== 'T') r++;
+      for (let b = a; b < a + 14; b++) if (!isW(full[b])) r++;
       min14 = Math.min(min14, r);
       if (r < st.cfg.min14) {
         const i = a - pre.length, da = i < 0 ? addDays(days[0], i) : days[i];
@@ -989,8 +1000,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const pol = (colectivoInfo(st, g.col) || {}).festivos || 'rot';
     seq.forEach((x, i) => {
       if (x === 'D' && st.festivos[days[i]]) issues.push(`Franqueo en festivo (debería ser FNR): ${fmt(days[i])}`);
-      else if (x === 'T' && st.festivos[days[i]] && pol === 'all') issues.push(`Trabaja en festivo: ${fmt(days[i])}`);
-      else if (x === 'T' && vac[days[i]]) issues.push(`Trabaja dentro de sus vacaciones: ${fmt(days[i])}`);
+      else if (isW(x) && st.festivos[days[i]] && pol === 'all') issues.push(`Trabaja en festivo: ${fmt(days[i])}`);
+      else if (isW(x) && vac[days[i]]) issues.push(`Trabaja dentro de sus vacaciones: ${fmt(days[i])}`);
     });
     const manual = Object.keys(st.locked[k] || {}).length;
     return { counts, rest, maxRun, min14, issues, manual };
@@ -999,7 +1010,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function coverage(st, col) {
     const days = yearDays(st.year), gs = groupsOf(st, col), nec = st.nec[col] || {};
     return days.map((iso, i) => {
-      const t = gs.reduce((s, g) => s + ((st.cal[key(g.col, g.letra)] || [])[i] === 'T' ? g.personas : 0), 0);
+      const t = gs.reduce((s, g) => s + (isW((st.cal[key(g.col, g.letra)] || [])[i]) ? g.personas : 0), 0);
       return { iso, trabajan: t, necesarios: nec[iso] || 0, diff: t - (nec[iso] || 0) };
     });
   }
@@ -1059,7 +1070,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const cfg = Object.assign({}, st.cfg, { work: d1.length - st.cfg.rest });
     return {
       year: y1, cfg, cycles: JSON.parse(JSON.stringify(st.cycles)),
-      colectivos: st.colectivos.map((c) => Object.assign({}, c)), groups, festivos, festivosRevisar: revisar,
+      colectivos: st.colectivos.map((c) => Object.assign({}, c, c.hasta ? { hasta: `${y1}${c.hasta.slice(4)}` } : {})), groups, festivos, festivosRevisar: revisar,
       vac: {}, nec, necEstimados: true, cierre, cierreFechas: last, cal: {}, gen: {}, locked: {},
     };
   }
@@ -1069,7 +1080,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
              cierre: {}, cal: {}, gen: {}, locked: {} };
   }
 
-  const api = { DAY, REST, VALUES, isoOf, tOf, addDays, weekday, diffDays, yearDays, monday0, fmt, key, easter,
+  const api = { DAY, REST, VALUES, colectivoOf: colectivoInfo, VALUES_TURNOS, ALLVALUES, isW, isoOf, tOf, addDays, weekday, diffDays, yearDays, monday0, fmt, key, easter,
     groupsOf, baseValue, overlay, generateColectivo, rebalanceGroup, validateGroup, coverage, setValue,
     clearGroupChanges, nextYear, emptyState, localOk, blocks };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -1086,6 +1097,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     'Octubre', 'Noviembre', 'Diciembre'];
   const WD = 'LMXJVSD';
   const COLS = { D: 'B8B8B8', V: 'CDB6EE', FNR: '8FAADC', '2V': 'BFE0A8' };
+  const COLS_TUR = { M: '92D050', T: 'F8CBAD', D: 'E8332A', V: 'CDB6EE', FNR: 'FFFFFF', '2V': 'BFE0A8' };
+  const NOTA_INT = 'Propuesta de calendario para interinos. No es el cuadrante oficial de EMB.';
+  const colsOf = (info) => (info && info.turnos ? COLS_TUR : COLS);
   const NOTA = 'Propuesta: continuación de la rotación del año anterior. No es el cuadrante oficial de EMB.';
   const NOTA_FINDE = 'Propuesta con la regla de la línea: se libran sábados, domingos y festivos; los puentes se trabajan.';
 
@@ -1156,13 +1170,13 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       const name = str(r[0]); if (!name) continue;
       const weeks = num(r[1]) || 1;
       const p = str(r[2]).toUpperCase().replace(/\s+/g, '').replace(/\./g, 'T');
-      if (p.length !== weeks * 7 || /[^TD]/.test(p)) { warn.push(`Ciclo ${name}: el patrón no tiene ${weeks * 7} letras T/D`); continue; }
+      if (p.length !== weeks * 7 || /[^TDM]/.test(p)) { warn.push(`Ciclo ${name}: el patrón no tiene ${weeks * 7} letras T/D/M`); continue; }
       st.cycles[name] = { weeks, pattern: p, desc: str(r[3]) };
     }
     for (const r of rows(sheet('Colectivos'))) {
       const id = str(r[0]); if (!id) continue;
       const fe = str(r[4]).toLowerCase();
-      st.colectivos.push({ id, title: str(r[1]) || id, balance: r[2] === null ? true : yes(str(r[2])),
+      st.colectivos.push({ id, title: str(r[1]) || id, balance: r[2] === null ? true : yes(str(r[2])), turnos: yes(str(r[5])), hasta: isoFrom(r[6]) || null,
         file: str(r[3]) || id.replace(/[^\w-]/g, ''), festivos: fe.startsWith('ajust') || fe.startsWith('nece') ? 'nec' : fe.startsWith('cubr') ? 'min' : fe.startsWith('tod') ? 'all' : 'rot' });
     }
     const keys = new Set();
@@ -1224,16 +1238,16 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         });
       }
       for (const [k, arr] of Object.entries(tmp)) {
-        if (arr.every((x) => C.VALUES.includes(x))) { st.cal[k] = arr; st.gen[k] = arr.slice(); }
+        if (arr.every((x) => C.ALLVALUES.includes(x))) { st.cal[k] = arr; st.gen[k] = arr.slice(); }
         else warn.push(`Calendario ${c.id}: la letra ${k.split('|')[1]} tiene días vacíos o raros; se genera de nuevo`);
       }
     }
     for (const r of rows(sheet('Cambios'))) {
       const k = C.key(str(r[0]), str(r[1])), d = isoFrom(r[2]), v = str(r[3]).toUpperCase(), orig = str(r[4]).toUpperCase();
-      if (!keys.has(k) || !d || !C.VALUES.includes(v)) continue;
+      if (!keys.has(k) || !d || !C.ALLVALUES.includes(v)) continue;
       (st.locked[k] = st.locked[k] || {})[d] = v;
       const i = C.diffDays(d, days[0]);
-      if (st.cal[k]) { st.cal[k][i] = v; if (C.VALUES.includes(orig)) st.gen[k][i] = orig; }
+      if (st.cal[k]) { st.cal[k][i] = v; if (C.ALLVALUES.includes(orig)) st.gen[k][i] = orig; }
     }
     // generar lo que falte
     const generados = [];
@@ -1284,7 +1298,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       ['', false],
       ['Qué hay en cada hoja', true],
       ['Config: año y reglas del convenio. Trabajo + descanso deben sumar los días del año (365 o 366).', false],
-      ['Ciclos: forma de cada rotación, semana a semana de lunes a domingo. T = trabajo, D = franqueo.', false],
+      ['Ciclos: forma de cada rotación, semana a semana de lunes a domingo. T = trabajo, D = franqueo (M y T = mañana y tarde en los colectivos con turnos).', false],
       ['Colectivos: título de los PDF ({AÑO} se sustituye), si la app cuadra los descansos al objetivo y cómo se reparten los festivos.', false],
       ['Grupos: una fila por letra. "Semana inicial" = semana del ciclo en la que cae la semana del 1 de enero.', false],
       ['Festivos, Vacaciones (una fila por periodo, Tipo V o 2V) y Necesarios por día y colectivo.', false],
@@ -1318,10 +1332,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       cy.getCell(i + 2, 3).font = blue;
     });
     const co = wb.addWorksheet('Colectivos');
-    header(co, 1, ['Colectivo', 'Título', 'Cuadrar a objetivo', 'Nombre de archivo', 'Festivos'], [11, 42, 11, 18, 14]);
+    header(co, 1, ['Colectivo', 'Título', 'Cuadrar a objetivo', 'Nombre de archivo', 'Festivos', 'Turnos M/T', 'Hasta'], [11, 42, 11, 18, 14, 11, 12]);
     const FEST = { nec: 'Ajustar a necesarios', min: 'Cubrir necesarios', rot: 'Rotación', all: 'Todos libran' };
-    st.colectivos.forEach((c, i) => { co.getRow(i + 2).values = [c.id, c.title, c.balance ? 'Sí' : 'No', c.file, FEST[c.festivos || 'rot']]; });
-    co.getColumn(7).width = 90; co.getCell(1, 7).value = 'Notas'; co.getCell(1, 7).font = font({ bold: true }); co.getCell(2, 7).value = 'Festivos — Rotación: trabaja quien le toca. Cubrir necesarios: además, si no se llega, se llama a gente que tenía franqueo. Ajustar a necesarios: se cubre y libran (FNR) los que sobran. Todos libran. Un franqueo que cae en festivo pasa siempre a FNR.';
+    st.colectivos.forEach((c, i) => { co.getRow(i + 2).values = [c.id, c.title, c.balance ? 'Sí' : 'No', c.file, FEST[c.festivos || 'rot'], c.turnos ? 'Sí' : 'No', null]; if (c.hasta) dateCell(co.getCell(i + 2, 7), c.hasta); });
+    co.getColumn(9).width = 90; co.getCell(1, 9).value = 'Notas'; co.getCell(1, 9).font = font({ bold: true }); co.getCell(2, 9).value = 'Festivos — Rotación: trabaja quien le toca. Cubrir necesarios: además, si no se llega, se llama a gente que tenía franqueo. Ajustar a necesarios: se cubre y libran (FNR) los que sobran. Todos libran. Un franqueo que cae en festivo pasa siempre a FNR. Turnos M/T: Sí para interinos (M = mañana y T = tarde cuentan como trabajo, sin objetivo anual de días). Hasta: última fecha que sale en los PDF y en el Excel (vacío = todo el año).';
     const gr = wb.addWorksheet('Grupos');
     header(gr, 1, ['Colectivo', 'Letra', 'Franqueo', 'Grupo', 'Personas', 'Ciclo', 'Semana inicial', 'Matrícula'], [11, 9, 10, 8, 10, 8, 10, 11]);
     st.groups.forEach((g, i) => {
@@ -1393,9 +1407,13 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
   /** Excel de un colectivo: Resumen + Cuadrante + una pestaña por letra. */
   async function excelColectivo(ExcelJS, st, col) {
-    const gs = C.groupsOf(st, col), days = C.yearDays(st.year), info = st.colectivos.find((c) => c.id === col);
+    const gs = C.groupsOf(st, col), daysAll = C.yearDays(st.year), info = st.colectivos.find((c) => c.id === col);
+    const tur = !!(info && info.turnos), CO = colsOf(info);
+    const days = info && info.hasta ? daysAll.filter((d) => d <= info.hasta) : daysAll;
+    const lastM = +days[days.length - 1].slice(5, 7);
     const titulo = titleOf(st, col), finde = gs.every((g) => g.ciclo === 'FINDE');
-    const nota = finde ? NOTA_FINDE : NOTA;
+    const nota = tur ? NOTA_INT : finde ? NOTA_FINDE : NOTA;
+    const cntOf = (g) => { const c = { M: 0, T: 0, D: 0, V: 0, '2V': 0, FNR: 0 }; st.cal[C.key(g.col, g.letra)].slice(0, days.length).forEach((x) => { c[x]++; }); return c; };
     const wb = new ExcelJS.Workbook();
     const res = wb.addWorksheet('Resumen'), cq = wb.addWorksheet('Cuadrante');
     const FIRST = 5, last = FIRST + days.length - 1, n = gs.length;
@@ -1413,12 +1431,12 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       dateCell(cq.getCell(r, 1), d); cq.getCell(r, 1).font = font();
       const w = cq.getCell(r, 2); w.value = WD[C.weekday(d)]; w.alignment = center; w.font = font({ color: { argb: 'FF333333' } });
       gs.forEach((g, j) => { const c = cq.getCell(r, gcol(j)); c.value = st.cal[C.key(g.col, g.letra)][i]; c.alignment = center; c.font = font({ color: { argb: 'FF0000FF' } }); });
-      cq.getCell(r, cT).value = { formula: `SUMPRODUCT((${g0}${r}:${g1}${r}="T")*(${g0}$2:${g1}$2))`, result: cov[i].trabajan };
+      cq.getCell(r, cT).value = { formula: tur ? `SUMPRODUCT(((${g0}${r}:${g1}${r}="T")+(${g0}${r}:${g1}${r}="M"))*(${g0}$2:${g1}$2))` : `SUMPRODUCT((${g0}${r}:${g1}${r}="T")*(${g0}$2:${g1}$2))`, result: cov[i].trabajan };
       cq.getCell(r, cN).value = cov[i].necesarios; cq.getCell(r, cN).font = font({ color: { argb: 'FF0000FF' } });
       cq.getCell(r, cD).value = { formula: `${colL(cT)}${r}-${colL(cN)}${r}`, result: cov[i].diff };
       [cT, cN, cD].forEach((c) => { cq.getCell(r, c).alignment = center; if (c !== cN) cq.getCell(r, c).font = font(); });
     });
-    const cfRules = Object.entries(COLS).map(([v, hex]) => ({ type: 'cellIs', operator: 'equal', formulae: [`"${v}"`],
+    const cfRules = Object.entries(CO).map(([v, hex]) => ({ type: 'cellIs', operator: 'equal', formulae: [`"${v}"`],
       style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FF' + hex } }, font: { bold: true } } }));
     cq.addConditionalFormatting({ ref: `${g0}${FIRST}:${g1}${last}`, rules: cfRules });
     cq.addConditionalFormatting({ ref: `${colL(cD)}${FIRST}:${colL(cD)}${last}`, rules: [{ type: 'cellIs', operator: 'lessThan', formulae: ['0'], style: { font: { bold: true, color: { argb: 'FFC00000' } } } }] });
@@ -1429,13 +1447,18 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
     res.getCell('A1').value = titulo; res.getCell('A1').font = font({ bold: true, size: 14 });
     res.getCell('A2').value = nota; res.getCell('A2').font = font({ italic: true, size: 9, color: { argb: 'FF555555' } });
-    const heads = ['Franqueo', 'Grupo', 'Personas', 'Trabajo (T)', 'Franqueo (D)', 'Vacaciones (V)', 'Vac. adicionales (2V)', 'FNR', 'Total descansos', 'Total días', 'Comprobación'];
+    const heads = tur ? ['Letra', 'Grupo', 'Personas', 'Mañana (M)', 'Tarde (T)', 'Franqueo (D)', 'Vacaciones (V)', 'FNR', 'Total descansos', 'Total trabajo', 'Total días']
+      : ['Franqueo', 'Grupo', 'Personas', 'Trabajo (T)', 'Franqueo (D)', 'Vacaciones (V)', 'Vac. adicionales (2V)', 'FNR', 'Total descansos', 'Total días', 'Comprobación'];
     heads.forEach((h, j) => { const c = res.getCell(4, j + 1); c.value = h; c.font = font({ bold: true }); c.fill = fill('BDEBF2'); c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }; c.border = box; });
     res.getRow(4).height = 30;
     gs.forEach((g, i) => {
-      const r = 5 + i, L = colL(gcol(i)), rng = `Cuadrante!${L}$${FIRST}:${L}$${last}`, v = C.validateGroup(st, g), cnt = v.counts;
+      const r = 5 + i, L = colL(gcol(i)), rng = `Cuadrante!${L}$${FIRST}:${L}$${last}`, v = C.validateGroup(st, g), cnt = tur ? cntOf(g) : v.counts;
       const ok = cnt.T === st.cfg.work && v.rest === st.cfg.rest && days.length === cnt.T + v.rest;
-      const vals = [g.franqueo === g.letra ? g.letra : `${g.letra}`, g.grupo, { formula: `Cuadrante!${L}$2`, result: g.personas },
+      const rr = (cnt.D || 0) + (cnt.V || 0) + (cnt.FNR || 0) + (cnt['2V'] || 0);
+      const vals = tur ? [g.letra, g.grupo, { formula: `Cuadrante!${L}$2`, result: g.personas },
+        { formula: `COUNTIF(${rng},"M")`, result: cnt.M }, { formula: `COUNTIF(${rng},"T")`, result: cnt.T }, { formula: `COUNTIF(${rng},"D")`, result: cnt.D },
+        { formula: `COUNTIF(${rng},"V")+COUNTIF(${rng},"2V")`, result: cnt.V + cnt['2V'] }, { formula: `COUNTIF(${rng},"FNR")`, result: cnt.FNR },
+        { formula: `SUM(F${r}:H${r})`, result: rr }, { formula: `D${r}+E${r}`, result: cnt.M + cnt.T }, { formula: `I${r}+J${r}`, result: days.length }] : [g.franqueo === g.letra ? g.letra : `${g.letra}`, g.grupo, { formula: `Cuadrante!${L}$2`, result: g.personas },
         { formula: `COUNTIF(${rng},"T")`, result: cnt.T }, { formula: `COUNTIF(${rng},"D")`, result: cnt.D },
         { formula: `COUNTIF(${rng},"V")`, result: cnt.V }, { formula: `COUNTIF(${rng},"2V")`, result: cnt['2V'] },
         { formula: `COUNTIF(${rng},"FNR")`, result: cnt.FNR }, { formula: `SUM(E${r}:H${r})`, result: v.rest },
@@ -1443,10 +1466,14 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         { formula: `IF(AND(D${r}=${st.cfg.work},I${r}=${st.cfg.rest},J${r}=${days.length}),"OK","REVISAR")`, result: ok ? 'OK' : 'REVISAR' }];
       vals.forEach((x, j) => { const c = res.getCell(r, j + 1); c.value = x; c.font = font({ bold: j === 0 }); c.alignment = center; c.border = box; });
     });
-    res.addConditionalFormatting({ ref: `K5:K${4 + n}`, rules: [{ type: 'cellIs', operator: 'equal', formulae: ['"REVISAR"'], style: { font: { bold: true, color: { argb: 'FFC00000' } } } }] });
+    if (!tur) res.addConditionalFormatting({ ref: `K5:K${4 + n}`, rules: [{ type: 'cellIs', operator: 'equal', formulae: ['"REVISAR"'], style: { font: { bold: true, color: { argb: 'FFC00000' } } } }] });
     [11, 7, 9, 11, 12, 13, 13, 7, 13, 10, 13].forEach((w, j) => { res.getColumn(j + 1).width = w; });
     res.views = [{ state: 'frozen', ySplit: 4 }];
-    const notas = ['Cómo se ha hecho',
+    const notas = tur ? ['Cómo se ha hecho',
+      '· Ciclo fijo de turnos: cada pareja (N y N.2) tiene turnos opuestos; M = mañana y T = tarde cuentan como trabajo.',
+      '· Sin objetivo anual de días: estos calendarios son una propuesta para el periodo indicado.',
+      '· Vacaciones y festivos solo sustituyen días de trabajo: un festivo que cae en vacaciones es FNR.',
+      '· Todo sale de la hoja Cuadrante: cambiar una letra allí la cambia en su pestaña y en este resumen.'] : ['Cómo se ha hecho',
       `· Objetivo por grupo: ${st.cfg.work} días de trabajo y ${st.cfg.rest} de descanso (franqueos + vacaciones + FNR).`,
       '· Vacaciones y festivos solo sustituyen días de trabajo: un franqueo que cae en vacaciones sigue siendo D y un festivo que cae en vacaciones es FNR.',
       `· Máximo ${st.cfg.maxRun} días seguidos de trabajo y al menos ${st.cfg.min14} descansos en cada 14 días, contando el final del año anterior.`,
@@ -1457,14 +1484,14 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       const ws = wb.addWorksheet(sheetName(g.mat ? `${g.letra} ${g.mat}` : g.letra));
       const L = colL(gcol(gi));
       ws.getCell('A1').value = 'Grupo'; ws.getCell('A1').font = font({ bold: true, size: 12 });
-      ws.getCell('A2').value = g.grupo; ws.getCell('A2').font = font({ bold: true, size: 14, color: { argb: 'FF1F4E9E' } }); ws.getCell('A2').alignment = { horizontal: 'left' };
+      ws.getCell('A2').value = tur ? g.letra : g.grupo; ws.getCell('A2').font = font({ bold: true, size: 14, color: { argb: 'FF1F4E9E' } }); ws.getCell('A2').alignment = { horizontal: 'left' };
       ws.mergeCells('D1:AB1'); ws.getCell('D1').value = titulo; ws.getCell('D1').font = font({ bold: true, size: 14 }); ws.getCell('D1').alignment = center;
-      ws.mergeCells('AC1:AF1'); ws.getCell('AC1').value = `Franqueo ${g.franqueo}`; ws.getCell('AC1').font = font({ bold: true, size: 12 }); ws.getCell('AC1').alignment = { horizontal: 'right' };
+      if (!tur) { ws.mergeCells('AC1:AF1'); ws.getCell('AC1').value = `Franqueo ${g.franqueo}`; ws.getCell('AC1').font = font({ bold: true, size: 12 }); ws.getCell('AC1').alignment = { horizontal: 'right' }; }
       if (g.mat) { ws.mergeCells('AC2:AF2'); ws.getCell('AC2').value = `Matrícula ${g.mat}`; ws.getCell('AC2').alignment = { horizontal: 'right' }; ws.getCell('AC2').font = font(); }
       ws.mergeCells('B4:AF4'); ws.getCell('B4').value = 'DIAS'; ws.getCell('B4').font = font({ bold: true, size: 8 }); ws.getCell('B4').fill = fill('BDEBF2'); ws.getCell('B4').alignment = center;
       for (let c = 1; c <= 32; c++) { const x = ws.getCell(5, c); x.value = c === 1 ? 'MESES' : c - 1; x.font = font({ bold: true, size: 9 }); x.fill = fill('BDEBF2'); x.alignment = center; x.border = box; }
       const vrows = [];
-      for (let m = 1; m <= 12; m++) {
+      for (let m = 1; m <= lastM; m++) {
         const r = 6 + 2 * (m - 1);
         ws.mergeCells(r, 1, r + 1, 1);
         const x = ws.getCell(r, 1); x.value = MES[m - 1]; x.font = font(); x.fill = fill('D6F3F7'); x.alignment = { vertical: 'middle' }; x.border = box;
@@ -1479,9 +1506,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         ws.getRow(r).height = 11; ws.getRow(r + 1).height = 17;
       }
       ws.addConditionalFormatting({ ref: vrows.join(' '), rules: cfRules });
-      const rng = `Cuadrante!${L}$${FIRST}:${L}$${last}`, cnt = C.validateGroup(st, g).counts, r0 = 32;
+      const rng = `Cuadrante!${L}$${FIRST}:${L}$${last}`, cnt = tur ? cntOf(g) : C.validateGroup(st, g).counts, r0 = 6 + 2 * lastM + 2;
       ws.mergeCells(r0, 1, r0, 8); ws.getCell(r0, 1).value = 'Resumen'; ws.getCell(r0, 1).font = font({ bold: true, size: 9 }); ws.getCell(r0, 1).alignment = center;
-      const filas = [['Total días trabajo', 'T'], ['Total días franqueo', 'D'], ['Total días vacaciones', 'V'], ['Total días vac. adicionales', '2V'], ['Total días FNR', 'FNR']];
+      const filas = tur ? [['Total días mañana (M)', 'M'], ['Total días tarde (T)', 'T'], ['Total días franqueo', 'D'], ['Total días vacaciones', 'V'], ['Total días FNR', 'FNR']]
+        : [['Total días trabajo', 'T'], ['Total días franqueo', 'D'], ['Total días vacaciones', 'V'], ['Total días vac. adicionales', '2V'], ['Total días FNR', 'FNR']];
       filas.forEach(([t, code], k) => {
         ws.mergeCells(r0 + k + 1, 1, r0 + k + 1, 7); ws.getCell(r0 + k + 1, 1).value = t; ws.getCell(r0 + k + 1, 1).font = font({ size: 9 });
         const c = ws.getCell(r0 + k + 1, 8); c.value = { formula: `COUNTIF(${rng},"${code}")`, result: cnt[code] || 0 }; c.font = font({ size: 9 }); c.alignment = center;
@@ -1490,8 +1518,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       ws.mergeCells(rt, 1, rt, 7); ws.getCell(rt, 1).value = 'TOTAL'; ws.getCell(rt, 1).font = font({ bold: true, size: 9 });
       ws.getCell(rt, 8).value = { formula: `SUM(H${r0 + 1}:H${r0 + filas.length})`, result: days.length }; ws.getCell(rt, 8).font = font({ bold: true, size: 9 }); ws.getCell(rt, 8).alignment = center;
       ws.mergeCells(r0, 25, r0, 32); ws.getCell(r0, 25).value = 'Leyenda'; ws.getCell(r0, 25).font = font({ bold: true, size: 9 }); ws.getCell(r0, 25).alignment = center;
-      [['T', 'Trabajo'], ['D', 'Franqueo'], ['V', 'Vacaciones'], ['FNR', 'Fiesta No Recuperable'], ['2V', 'Vacaciones adicionales']].forEach(([code, t], k) => {
-        const c = ws.getCell(r0 + k + 1, 25); c.value = code; c.font = font({ bold: true, size: 8 }); c.alignment = center; if (COLS[code]) c.fill = fill(COLS[code]);
+      (tur ? [['M', 'Mañana'], ['T', 'Tarde'], ['D', 'Franqueo'], ['V', 'Vacaciones'], ['FNR', 'Fiesta No Recuperable']] : [['T', 'Trabajo'], ['D', 'Franqueo'], ['V', 'Vacaciones'], ['FNR', 'Fiesta No Recuperable'], ['2V', 'Vacaciones adicionales']]).forEach(([code, t], k) => {
+        const c = ws.getCell(r0 + k + 1, 25); c.value = code; c.font = font({ bold: true, size: 8 }); c.alignment = center; if (CO[code]) c.fill = fill(CO[code]);
         ws.mergeCells(r0 + k + 1, 26, r0 + k + 1, 32); ws.getCell(r0 + k + 1, 26).value = `${code} = ${t}`; ws.getCell(r0 + k + 1, 26).font = font({ size: 9 });
       });
       ws.getCell(rt + 2, 1).value = nota; ws.getCell(rt + 2, 1).font = font({ italic: true, size: 8, color: { argb: 'FF555555' } });
@@ -1507,12 +1535,14 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function pdfGroup(jsPDF, st, g) {
     const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
     const W = 841.89, H = 595.28, ml = 22, days = C.yearDays(st.year), seq = st.cal[C.key(g.col, g.letra)];
+    const info = st.colectivos.find((c) => c.id === g.col), tur = !!(info && info.turnos), CO = colsOf(info);
+    const lastM = info && info.hasta ? +info.hasta.slice(5, 7) : 12, hasta = info && info.hasta;
     const titulo = titleOf(st, g.col), finde = g.ciclo === 'FINDE';
     doc.setTextColor(0);
     doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.text('Grupo', ml + 4, 48);
-    doc.setTextColor(31, 78, 158); doc.setFontSize(15); doc.text(String(g.grupo), ml + 10, 66);
+    doc.setTextColor(31, 78, 158); doc.setFontSize(15); doc.text(String(tur ? g.letra : g.grupo), ml + 10, 66);
     doc.setTextColor(0); doc.setFontSize(14); doc.text(titulo, W / 2, 52, { align: 'center' });
-    doc.setFontSize(13); doc.text(`Franqueo ${g.franqueo}`, W - ml, 48, { align: 'right' });
+    if (!tur) { doc.setFontSize(13); doc.text(`Franqueo ${g.franqueo}`, W - ml, 48, { align: 'right' }); }
     if (g.mat) { doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text(`Matrícula ${g.mat}`, W - ml, 63, { align: 'right' }); }
     const lab = 70, cw = (W - 2 * ml - lab) / 31, rw = 11, rv = 14;
     let y = 88;
@@ -1525,7 +1555,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     for (let k = 0; k < 31; k++) doc.text(String(k + 1), ml + lab + cw * (k + 0.5), y + 10, { align: 'center' });
     doc.setDrawColor(...rgb('9AA7AD')); doc.setLineWidth(0.4); doc.rect(ml, y - 11, lab + cw * 31, 24, 'S');
     y += 13;
-    for (let m = 1; m <= 12; m++) {
+    for (let m = 1; m <= lastM; m++) {
       const nd = new Date(Date.UTC(st.year, m, 0)).getUTCDate(), top = y;
       doc.setFillColor(...rgb('D6F3F7')); doc.rect(ml, y, lab, rw + rv, 'F'); doc.rect(ml + lab, y, cw * nd, rw, 'F');
       doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(0); doc.text(MES[m - 1], ml + 4, y + rw + rv / 2 - 1);
@@ -1539,7 +1569,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       for (let k = 0; k < nd; k++) {
         const d = `${st.year}-${String(m).padStart(2, '0')}-${String(k + 1).padStart(2, '0')}`, v = seq[C.diffDays(d, days[0])];
         const x = ml + lab + cw * k;
-        if (COLS[v]) { doc.setFillColor(...rgb(COLS[v])); doc.rect(x + 0.6, y + 0.8, cw - 1.2, rv - 1.6, 'F'); }
+        if (CO[v]) { doc.setFillColor(...rgb(CO[v])); doc.rect(x + 0.6, y + 0.8, cw - 1.2, rv - 1.6, 'F'); }
         doc.setFont('helvetica', v === 'T' ? 'normal' : 'bold'); doc.setFontSize(v === 'FNR' ? 6.4 : 7.6);
         doc.text(v, x + cw / 2, y + 10, { align: 'center' });
       }
@@ -1549,9 +1579,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       for (let k = 0; k <= nd; k++) doc.line(ml + lab + cw * k, top, ml + lab + cw * k, y);
       doc.line(ml + lab, top + rw, ml + lab + cw * nd, top + rw);
     }
-    const cnt = C.validateGroup(st, g).counts;
-    const filas = [['Total días trabajo', cnt.T], ['Total días franqueo', cnt.D], ['Total días vacaciones', cnt.V]];
-    if (cnt['2V']) filas.push(['Total días vac. adicionales', cnt['2V']]);
+    const shown = hasta ? seq.slice(0, days.filter((d) => d <= hasta).length) : seq;
+    const cnt = { M: 0, T: 0, D: 0, V: 0, '2V': 0, FNR: 0 }; shown.forEach((x) => { cnt[x]++; });
+    const filas = tur ? [['Días de mañana (M)', cnt.M], ['Días de tarde (T)', cnt.T], ['Total días trabajo', cnt.M + cnt.T], ['Total días franqueo', cnt.D], ['Total días vacaciones', cnt.V + cnt['2V']]]
+      : [['Total días trabajo', cnt.T], ['Total días franqueo', cnt.D], ['Total días vacaciones', cnt.V]];
+    if (!tur && cnt['2V']) filas.push(['Total días vac. adicionales', cnt['2V']]);
     filas.push(['Total días FNR', cnt.FNR]);
     y += 16;
     const bw = 200, bh = 11;
@@ -1565,19 +1597,19 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     }
     yy += 8;
     doc.rect(ml, yy, bw, bh, 'S'); doc.line(ml + 160, yy, ml + 160, yy + bh);
-    doc.text('TOTAL', ml + 3, yy + 8.3); doc.text(String(seq.length), ml + bw - 4, yy + 8.3, { align: 'right' });
+    doc.text('TOTAL', ml + 3, yy + 8.3); doc.text(String(shown.length), ml + bw - 4, yy + 8.3, { align: 'right' });
     const lx = W - ml - 205;
     doc.rect(lx, y, 205, bh, 'S'); doc.text('Leyenda', lx + 102, y + 8.3, { align: 'center' });
     yy = y + bh + 4;
-    for (const [code, t] of [['T', 'Trabajo'], ['D', 'Franqueo'], ['V', 'Vacaciones'], ['FNR', 'Fiesta No Recuperable'], ['2V', 'Vacaciones adicionales']]) {
-      if (COLS[code]) { doc.setFillColor(...rgb(COLS[code])); doc.rect(lx + 4, yy + 0.5, 18, 8.5, 'F'); }
+    for (const [code, t] of (tur ? [['M', 'Mañana'], ['T', 'Tarde'], ['D', 'Franqueo'], ['V', 'Vacaciones'], ['FNR', 'Fiesta No Recuperable']] : [['T', 'Trabajo'], ['D', 'Franqueo'], ['V', 'Vacaciones'], ['FNR', 'Fiesta No Recuperable'], ['2V', 'Vacaciones adicionales']])) {
+      if (CO[code]) { doc.setFillColor(...rgb(CO[code])); doc.rect(lx + 4, yy + 0.5, 18, 8.5, 'F'); doc.setDrawColor(...rgb('9AA7AD')); doc.rect(lx + 4, yy + 0.5, 18, 8.5, 'S'); }
       doc.setFont('helvetica', 'bold'); doc.setFontSize(6.5); doc.text(code, lx + 13, yy + 7.2, { align: 'center' });
       doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.text(`${code} = ${t}`, lx + 28, yy + 7.5);
       yy += 11;
     }
     doc.rect(lx, y + bh, 205, yy - (y + bh) + 2, 'S');
     doc.setFont('helvetica', 'italic'); doc.setFontSize(7); doc.setTextColor(85);
-    doc.text(finde ? NOTA_FINDE : NOTA, W / 2, H - 14, { align: 'center' });
+    doc.text(tur ? NOTA_INT : finde ? NOTA_FINDE : NOTA, W / 2, H - 14, { align: 'center' });
     doc.setProperties({ title: `${g.letra} ${st.year}` });
     return doc.output('arraybuffer');
   }
@@ -1612,7 +1644,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   const LS = 'calendariosEMB.v1';
   const MES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
   const WD = 'LMXJVSD';
-  const NAMES = { T: 'Trabajo', D: 'Franqueo', V: 'Vacaciones', '2V': 'Vacaciones adicionales', FNR: 'Fiesta no recuperable' };
+  const NAMES = { M: 'Mañana', T: 'Trabajo', D: 'Franqueo', V: 'Vacaciones', '2V': 'Vacaciones adicionales', FNR: 'Fiesta no recuperable' };
   const $ = (s, el = document) => el.querySelector(s);
   const h = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -1753,8 +1785,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     if (!g) { box.innerHTML = '<p class="empty">Este colectivo no tiene grupos en la plantilla.</p>'; return; }
     const k = C.key(g.col, g.letra), seq = st.cal[k], gen = st.gen[k] || seq, lk = st.locked[k] || {};
     const days = C.yearDays(st.year), v = C.validateGroup(st, g);
-    const vac = st.vac[k] || {};
-    let grid = '<div class="gridwrap"><table class="cal"><thead><tr><th class="mh" scope="col">Mes</th>';
+    const vac = st.vac[k] || {}, tur = !!(C.colectivoOf(st, g.col) || {}).turnos;
+    let grid = `<div class="gridwrap"><table class="cal${(C.colectivoOf(st, g.col) || {}).turnos ? ' tur' : ''}">`+'<thead><tr><th class="mh" scope="col">Mes</th>';
     for (let d = 1; d <= 31; d++) grid += `<th scope="col">${d}</th>`;
     grid += '</tr></thead><tbody>';
     for (let m = 1; m <= 12; m++) {
@@ -1765,27 +1797,26 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         const iso = `${st.year}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         const i = C.diffDays(iso, days[0]), x = seq[i], wd = C.weekday(iso);
         const cls = [`v-${x}`, wd >= 5 ? 'we' : '', lk[iso] ? 'man' : '', st.festivos[iso] ? 'fest' : '', vac[iso] ? 'invac' : ''].join(' ');
-        const tip = `${WD[wd]} ${C.fmt(iso)}: ${NAMES[x]}${st.festivos[iso] ? ' — ' + st.festivos[iso] : ''}${lk[iso] ? ` (a mano; generado: ${gen[i]})` : ''}`;
+        const tip = `${WD[wd]} ${C.fmt(iso)}: ${tur && x === 'T' ? 'Tarde' : NAMES[x]}${st.festivos[iso] ? ' — ' + st.festivos[iso] : ''}${lk[iso] ? ` (a mano; generado: ${gen[i]})` : ''}`;
         grid += `<td><button type="button" class="${cls}" data-iso="${iso}" title="${h(tip)}" aria-label="${h(tip)}"><i>${WD[wd]}</i><b>${x}</b></button></td>`;
       }
       grid += '</tr>';
     }
     grid += '</tbody></table></div>';
-    const c = v.counts, wOk = c.T === st.cfg.work, rOk = v.rest === st.cfg.rest;
+    const c = v.counts, wOk = tur ? undefined : c.T === st.cfg.work, rOk = tur ? undefined : v.rest === st.cfg.rest;
     const runOk = v.maxRun <= st.cfg.maxRun, m14Ok = v.min14 >= st.cfg.min14;
     const stat = (label, val, ok, extra) => `<div class="stat ${ok === undefined ? '' : ok ? 'ok' : 'bad'}"><span>${label}</span><strong>${val}</strong>${extra ? `<small>${extra}</small>` : ''}</div>`;
     box.innerHTML = `
       <header class="ghead">
-        <div><h2>${h(g.letra)}</h2><p>Grupo ${h(g.grupo)} de ${h(g.col)}, ${g.personas} ${g.personas === 1 ? 'persona' : 'personas'}${g.mat ? `, matrícula ${h(g.mat)}` : ''}. Ciclo ${h(g.ciclo)}, empieza el año en la semana ${g.sw}.</p></div>
+        <div><h2>${h(g.letra)}</h2><p>Grupo ${h(g.grupo)} de ${h(g.col)}, ${g.personas} ${g.personas === 1 ? 'persona' : 'personas'}${g.mat ? `, matrícula ${h(g.mat)}` : ''}. Ciclo ${h(g.ciclo)}, empieza el año en la semana ${g.sw}.${tur && (C.colectivoOf(st, g.col) || {}).hasta ? ` Los PDF y el Excel llegan hasta el ${C.fmt(C.colectivoOf(st, g.col).hasta)}.` : ''}</p></div>
         <div class="gactions">
-          <button type="button" id="rebal" title="Quita o pone franqueos para volver a ${st.cfg.work} de trabajo y ${st.cfg.rest} de descanso, sin tocar lo cambiado a mano">Recuadrar este grupo</button>
+          <button type="button" id="rebal" ${tur ? 'disabled' : ''} title="Quita o pone franqueos para volver a ${st.cfg.work} de trabajo y ${st.cfg.rest} de descanso, sin tocar lo cambiado a mano">Recuadrar este grupo</button>
           <button type="button" id="clearMan" ${v.manual ? '' : 'disabled'}>Quitar cambios a mano</button>
           <button type="button" id="undo" ${undo.length ? '' : 'disabled'}>Deshacer</button>
         </div>
       </header>
       <div class="stats">
-        ${stat('Trabajo', `${c.T}<em>/${st.cfg.work}</em>`, wOk)}
-        ${stat('Descanso', `${v.rest}<em>/${st.cfg.rest}</em>`, rOk)}
+        ${tur ? stat('Mañanas (M)', c.M) + stat('Tardes (T)', c.T) + stat('Descanso', v.rest) : stat('Trabajo', `${c.T}<em>/${st.cfg.work}</em>`, wOk) + stat('Descanso', `${v.rest}<em>/${st.cfg.rest}</em>`, rOk)}
         ${stat('Franqueos', c.D)}${stat('Vacaciones', c.V)}${stat('Vac. adic.', c['2V'])}${stat('FNR', c.FNR)}
         ${stat('Máx. seguidos', v.maxRun, runOk, `máx. ${st.cfg.maxRun}`)}
         ${stat('Descansos en 14 días', v.min14, m14Ok, `mín. ${st.cfg.min14}`)}
@@ -1795,7 +1826,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         ? `<h3>Avisos</h3><ul>${v.issues.map((x) => `<li>${h(x)}</li>`).join('')}</ul>`
         : '<p class="allok">Cumple el objetivo de días, el máximo de días seguidos y los descansos cada 14 días.</p>'}
       </div>
-      <p class="hint">Toca un día para cambiarlo. Con un día seleccionado también puedes pulsar T, D, V, 2 (2V) o F (FNR). Los días cambiados a mano llevan esquina marcada y se respetan al regenerar.</p>`;
+      <p class="hint">Toca un día para cambiarlo. Con un día seleccionado también puedes pulsar T, D, V, 2 (2V) o F (FNR), y M (mañana) en interinos. Los días cambiados a mano llevan esquina marcada y se respetan al regenerar.</p>`;
     box.querySelectorAll('.cal button').forEach((b) => { b.onclick = (e) => openPicker(b, e); b.onkeydown = keyEdit; });
     $('#rebal').onclick = () => {
       const before = st.cal[k].slice();
@@ -1831,7 +1862,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const i = C.diffDays(iso, C.yearDays(st.year)[0]), curv = st.cal[k][i], gen = (st.gen[k] || [])[i], man = !!(st.locked[k] || {})[iso];
     pickTarget = btn;
     p.innerHTML = `<p>${WD[C.weekday(iso)]} ${C.fmt(iso)}${st.festivos[iso] ? `<br><small>${h(st.festivos[iso])}</small>` : ''}</p>
-      <div class="opts">${C.VALUES.map((x) => `<button type="button" class="v-${x}" data-v="${x}" aria-pressed="${x === curv}">${x}</button>`).join('')}</div>
+      <div class="opts ${(C.colectivoOf(st, groupCur().col) || {}).turnos ? 'tur' : ''}">${((C.colectivoOf(st, groupCur().col) || {}).turnos ? C.VALUES_TURNOS : C.VALUES).map((x) => `<button type="button" class="v-${x}" data-v="${x}" aria-pressed="${x === curv}">${x}</button>`).join('')}</div>
       ${man ? `<button type="button" class="link" data-v="${gen}">Volver al generado (${gen})</button>` : ''}`;
     p.hidden = false;
     const r = btn.getBoundingClientRect();
@@ -1861,7 +1892,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     afterChange();
   }
   function keyEdit(e) {
-    const map = { t: 'T', d: 'D', v: 'V', 2: '2V', f: 'FNR' };
+    const map = { t: 'T', d: 'D', v: 'V', 2: '2V', f: 'FNR', m: 'M' };
     const v = map[e.key.toLowerCase()];
     if (v && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); setDay(e.currentTarget.dataset.iso, v); }
     const moves = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -31, ArrowDown: 31 };
