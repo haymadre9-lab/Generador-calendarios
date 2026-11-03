@@ -162,6 +162,8 @@ table.cob td:nth-child(2) { width: 38%; }
 .bar { display: inline-block; height: 12px; width: var(--w); max-width: calc(100% - 60px); background: var(--bad); opacity: .55; border-radius: 2px; vertical-align: middle; margin-right: 8px; }
 .num { font-family: var(--cond); font-weight: 600; font-variant-numeric: tabular-nums; }
 #viewCob h3 { margin: 22px 0 8px; font-size: 20px; }
+p.hint { line-height: 2.2; }
+p.hint input { width: 4.5em; padding: 3px 5px; font: inherit; }
 ul.worst { columns: 2 280px; padding-left: 20px; margin: 0; }
 
 .toast { position: fixed; left: 50%; bottom: 20px; visibility: hidden; transform: translate(-50%, calc(100% + 40px)); background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 8px; max-width: min(92vw, 640px); z-index: 50; transition: transform .25s ease; }
@@ -242,6 +244,7 @@ ul.worst { columns: 2 280px; padding-left: 20px; margin: 0; }
 
 <div id="picker" hidden role="dialog" aria-label="Cambiar el día"></div>
 <input type="file" id="file" accept=".xlsx" hidden>
+<input type="file" id="fileEmp" accept=".xlsx" hidden>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div id="busy" hidden></div>
 <script>
@@ -1015,6 +1018,160 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     });
   }
 
+  // ---------- bolsa de trabajo por mes ----------
+  // Los necesarios de la empresa ya llevan un absentismo base (6 %). Para probar otro, se escalan en proporcion.
+  function absFactor(st, abs) {
+    const base = st.cfg && st.cfg.absBase != null ? st.cfg.absBase : 0.06;
+    const a = abs != null ? abs : (st.cfg && st.cfg.absPrueba != null ? st.cfg.absPrueba : base);
+    return (1 + a) / (1 + base);
+  }
+  function bolsaMensual(st, col, abs) {
+    const f = absFactor(st, abs), cov = coverage(st, col);
+    const m = Array.from({ length: 12 }, () => ({ pd: 0, dias: 0, pico: 0, n: 0 }));
+    for (const d of cov) {
+      const x = m[+d.iso.slice(5, 7) - 1], falta = Math.max(0, d.necesarios * f - d.trabajan);
+      x.n++; x.pd += falta; if (falta > 0.5) x.dias++; if (falta > x.pico) x.pico = falta;
+    }
+    m.forEach((x) => { x.media = x.n ? x.pd / x.n : 0; });
+    const tot = { pd: m.reduce((s, x) => s + x.pd, 0), dias: m.reduce((s, x) => s + x.dias, 0), pico: Math.max(...m.map((x) => x.pico)) };
+    tot.media = tot.pd / Math.max(1, m.reduce((s, x) => s + x.n, 0));
+    return { meses: m, total: tot };
+  }
+
+  // ---------- ajuste a los necesarios de cada día ----------
+  // Mueve franqueos de días con exceso de gente a días con falta, dentro de cada grupo (mismos 205/160),
+  // respetando máximo de días seguidos, 3 descansos en 14 días, festivos, vacaciones y sin franqueos sueltos de 1 día.
+  function adjustToNeed(st, col, opts) {
+    const maxPer = (opts && opts.maxPerGroup) != null ? opts.maxPerGroup : 6, thr = (opts && opts.umbral) != null ? opts.umbral : 1.5;
+    const days = yearDays(st.year), gs = groupsOf(st, col), f = absFactor(st), nec0 = st.nec[col] || {};
+    if ((colectivoInfo(st, col) || {}).turnos) return { swaps: 0, changes: [] };
+    const nec = days.map((d) => (nec0[d] || 0) * f);
+    const seqOf = (g) => st.cal[key(g.col, g.letra)];
+    const work = days.map((d, i) => gs.reduce((s, g) => s + (isW(seqOf(g)[i]) ? g.personas : 0), 0));
+    const fest = days.map((d) => !!st.festivos[d]);
+    const single = (seq, i) => {
+      for (const j of [i - 1, i, i + 1]) {
+        if (j < 0 || j >= seq.length || seq[j] !== 'D') continue;
+        const l = j > 0 && !isW(seq[j - 1]), r = j < seq.length - 1 && !isW(seq[j + 1]);
+        if (!l && !r) return true;
+      }
+      return false;
+    };
+    const cnt = {}, changes = [], dead = new Set(); let swaps = 0;
+    gs.forEach((g) => { cnt[g.letra] = 0; });
+    const free = (g, i) => !(st.locked[key(g.col, g.letra)] || {})[days[i]] && !(st.vac[key(g.col, g.letra)] || {})[days[i]];
+    for (let it = 0; it < 4000; it++) {
+      let si = -1, sv = thr;
+      for (let i = 0; i < days.length; i++) { const e = work[i] - nec[i]; if (e > sv && !fest[i] && !dead.has(i)) { sv = e; si = i; } }
+      if (si < 0) break;
+      const defs = days.map((d, i) => [nec[i] - work[i], i]).filter((x) => x[0] > 0 && !fest[x[1]]).sort((a, b) => b[0] - a[0]).slice(0, 90);
+      let done = false;
+      for (const g of gs) {
+        if (cnt[g.letra] >= maxPer) continue;
+        const seq = seqOf(g), pre = prefixOf(st, g);
+        if (seq[si] !== 'T' || !free(g, si)) continue;
+        for (const [, di] of defs) {
+          if (seq[di] !== 'D' || !free(g, di)) continue;
+          seq[si] = 'D'; seq[di] = 'T';
+          if (!single(seq, si) && !single(seq, di) && localOk(st, seq, pre, di)) {
+            work[si] -= g.personas; work[di] += g.personas; cnt[g.letra]++; swaps++; done = true;
+            changes.push({ letra: g.letra, a: days[si], b: days[di] });
+            break;
+          }
+          seq[si] = 'T'; seq[di] = 'D';
+        }
+        if (done) break;
+      }
+      if (!done) dead.add(si);
+    }
+    // dejar constancia como cambios (se respetan al regenerar)
+    changes.forEach((c) => {
+      const g = gs.find((x) => x.letra === c.letra), k = key(g.col, g.letra);
+      st.locked[k] = st.locked[k] || {};
+      [[c.a, 'D'], [c.b, 'T']].forEach(([iso, v]) => {
+        const i = diffDays(iso, days[0]);
+        if (st.gen[k] && st.gen[k][i] === v) delete st.locked[k][iso]; else st.locked[k][iso] = v;
+      });
+    });
+    st.ajustes = st.ajustes || {};
+    st.ajustes[col] = (st.ajustes[col] || []).concat(changes);
+    return { swaps, changes };
+  }
+  function revertAdjust(st, col) {
+    const log = (st.ajustes || {})[col] || [], days = yearDays(st.year);
+    for (const c of log.slice().reverse()) {
+      const k = key(col, c.letra), seq = st.cal[k], ia = diffDays(c.a, days[0]), ib = diffDays(c.b, days[0]);
+      seq[ia] = 'T'; seq[ib] = 'D';
+      st.locked[k] = st.locked[k] || {};
+      [[c.a, 'T', ia], [c.b, 'D', ib]].forEach(([iso, v, i]) => { if (st.gen[k] && st.gen[k][i] === v) delete st.locked[k][iso]; else st.locked[k][iso] = v; });
+    }
+    st.ajustes[col] = [];
+    return log.length;
+  }
+
+  // ---------- ajuste completo (recocido simulado) ----------
+  // Igual que el ajuste sencillo pero con muchos más movimientos: busca el reparto que menos sobra/falta deja cada día,
+  // sin franqueos sueltos de 1 día y con tope de cambios por grupo. Mismo resultado en cada ejecución (semilla fija).
+  function adjustComplete(st, col, opts) {
+    const P = (opts && opts.maxPerGroup) != null ? opts.maxPerGroup : 12, iters = (opts && opts.iter) || 40000000;
+    const days = yearDays(st.year), gs = groupsOf(st, col), f = absFactor(st), nec0 = st.nec[col] || {};
+    if ((colectivoInfo(st, col) || {}).turnos || !gs.length) return { swaps: 0, changes: [] };
+    const N = days.length, nec = days.map((d) => Math.round((nec0[d] || 0) * f));
+    const G = gs.map((g) => {
+      const k = key(g.col, g.letra), seq = st.cal[k], vac = st.vac[k] || {}, lock = st.locked[k] || {};
+      const mov = []; for (let i = 0; i < N; i++) if ((seq[i] === 'T' || seq[i] === 'D') && !st.festivos[days[i]] && !vac[days[i]] && !lock[days[i]]) mov.push(i);
+      return { g, k, seq, pre: prefixOf(st, g), p: g.personas, orig: seq.slice(), mov, ch: 0 };
+    });
+    const work = days.map((d, i) => G.reduce((s, x) => s + (isW(x.seq[i]) ? x.p : 0), 0));
+    const cost = (i, w) => { const e = w - nec[i]; return e >= 0 ? 10 * e + 30 * Math.max(0, e - 10) + (e > 19 ? 1000 * (e - 19) : 0) : -10 * e; };
+    const singleAt = (seq, j) => { if (j < 0 || j >= N || seq[j] !== 'D') return 0; const l = j > 0 && !isW(seq[j - 1]), r = j < N - 1 && !isW(seq[j + 1]); return !l && !r ? 1 : 0; };
+    const sing = (seq, i) => { let n = 0; for (let j = i - 2; j <= i + 2; j++) n += singleAt(seq, j); return n; };
+    let seed = 12345; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    const T0 = (opts && opts.t0) || 8, T1 = (opts && opts.t1) || 0.2;
+    const startState = G.map((x) => x.seq.slice()); const startWork = work.slice();
+    for (let it = 0; it < iters; it++) {
+      const x = G[(rnd() * G.length) | 0]; if (x.mov.length < 2) continue;
+      const i = x.mov[(rnd() * x.mov.length) | 0], j = x.mov[(rnd() * x.mov.length) | 0];
+      if (x.seq[i] !== 'T' || x.seq[j] !== 'D') continue;
+      const dch = (x.orig[i] === 'T' ? 1 : -1) + (x.orig[j] === 'D' ? 1 : -1);
+      if (x.ch + dch > 2 * P) continue;
+      const before = sing(x.seq, i) + sing(x.seq, j);
+      x.seq[i] = 'D'; x.seq[j] = 'T';
+      if (!localOk(st, x.seq, x.pre, j)) { x.seq[i] = 'T'; x.seq[j] = 'D'; continue; }
+      const after = sing(x.seq, i) + sing(x.seq, j);
+      const dE = cost(i, work[i] - x.p) - cost(i, work[i]) + cost(j, work[j] + x.p) - cost(j, work[j]) + 150 * (after - before) + dch;
+      const T = T0 * Math.pow(T1 / T0, it / iters);
+      if (dE <= 0 || rnd() < Math.exp(-dE / T)) { work[i] -= x.p; work[j] += x.p; x.ch += dch; }
+      else { x.seq[i] = 'T'; x.seq[j] = 'D'; }
+    }
+    // comprobar y registrar
+    const bad = G.some((x) => validateGroup(st, x.g).issues.length);
+    if (bad) { G.forEach((x, n) => { for (let i = 0; i < N; i++) x.seq[i] = startState[n][i]; }); return { swaps: 0, changes: [], error: 'el resultado no cumplía las reglas y se ha descartado' }; }
+    const changes = [];
+    G.forEach((x) => {
+      const on = [], off = [];
+      for (let i = 0; i < N; i++) { if (x.orig[i] === 'T' && x.seq[i] === 'D') on.push(i); else if (x.orig[i] === 'D' && x.seq[i] === 'T') off.push(i); }
+      for (let n = 0; n < Math.min(on.length, off.length); n++) changes.push({ letra: x.g.letra, a: days[on[n]], b: days[off[n]] });
+      const lk = (st.locked[x.k] = st.locked[x.k] || {});
+      on.concat(off).forEach((i) => { const v = x.seq[i]; if (st.gen[x.k] && st.gen[x.k][i] === v) delete lk[days[i]]; else lk[days[i]] = v; });
+    });
+    st.ajustes = st.ajustes || {};
+    st.ajustes[col] = (st.ajustes[col] || []).concat(changes);
+    return { swaps: changes.length, changes };
+  }
+
+  // Genera desde la rotación y aplica el ajuste que tenga el colectivo (ajuste: 'sencillo' | 'completo' | '')
+  function generateAndAdjust(st, col) {
+    const info = colectivoInfo(st, col) || {};
+    gsClear(st, col);
+    generateColectivo(st, col);
+    st.ajustes = st.ajustes || {}; st.ajustes[col] = [];
+    if (info.ajuste === 'completo') return adjustComplete(st, col, { maxPerGroup: info.ajusteMax || 12 });
+    if (info.ajuste === 'sencillo') return adjustToNeed(st, col, { maxPerGroup: info.ajusteMax || 6 });
+    return { swaps: 0, changes: [] };
+  }
+  function gsClear(st, col) { groupsOf(st, col).forEach((g) => { st.locked[key(g.col, g.letra)] = {}; }); }
+
   // ---------- cambios a mano ----------
   function setValue(st, col, letra, iso, value) {
     const k = key(col, letra), i = diffDays(iso, `${st.year}-01-01`);
@@ -1081,7 +1238,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   }
 
   const api = { DAY, REST, VALUES, colectivoOf: colectivoInfo, VALUES_TURNOS, ALLVALUES, isW, isoOf, tOf, addDays, weekday, diffDays, yearDays, monday0, fmt, key, easter,
-    groupsOf, baseValue, overlay, generateColectivo, rebalanceGroup, validateGroup, coverage, setValue,
+    groupsOf, baseValue, overlay, generateColectivo, rebalanceGroup, validateGroup, coverage, absFactor, bolsaMensual, adjustToNeed, adjustComplete, revertAdjust, generateAndAdjust, setValue,
     clearGroupChanges, nextYear, emptyState, localOk, blocks };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Core = api;
@@ -1142,7 +1299,58 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     }
     return out;
   }
+  const pct = (v) => (v === null ? null : (v > 1 ? v / 100 : v));
   const yes = (s) => /^(s[ií]|si|yes|1|true|x)$/i.test(String(s || '').trim());
+
+  const MESES3 = { ene: 1, feb: 2, mar: 3, abr: 4, may: 5, jun: 6, jul: 7, ago: 8, sep: 9, oct: 10, nov: 11, dic: 12 };
+  function vacHoja(ws, tipo, warn) {
+    const out = {};
+    if (!ws) return out;
+    const codes = {}; for (let c = 5; c <= ws.columnCount; c++) { const v = num(ws.getRow(2).getCell(c).value); if (v !== null) codes[c] = v; }
+    for (let r = 4; r <= ws.rowCount; r++) {
+      const lab = str(ws.getRow(r).getCell(1).value), end = isoFrom(ws.getRow(r).getCell(2).value);
+      if (!lab || !end) continue;
+      const m = lab.match(/^([A-Za-zñÑ]{3})\w*\.?\s*(\d{1,2})\s*a\s*(\d{1,2})/);
+      if (!m || !MESES3[m[1].toLowerCase()]) { warn.push(`Vacaciones: no entiendo el periodo "${lab}"`); continue; }
+      const y = end.slice(0, 4), mo = String(MESES3[m[1].toLowerCase()]).padStart(2, '0');
+      const a = `${y}-${mo}-${m[2].padStart(2, '0')}`, b = `${y}-${mo}-${m[3].padStart(2, '0')}`;
+      for (const [c, cod] of Object.entries(codes)) {
+        const v = val(ws.getRow(r).getCell(+c).value);
+        if (v === null || v === '' || v === 0) continue;
+        out[cod] = out[cod] || {};
+        for (let d = a; d <= b; d = C.addDays(d, 1)) out[cod][d] = tipo;
+      }
+    }
+    return out;
+  }
+  /** Lee el Excel de la empresa: necesarios (1 Turnos), vacaciones (3 y 4), personas por grupo y absentismo. */
+  async function readEmpresa(ExcelJS, buf) {
+    const r = await readEmpresaNecesarios(ExcelJS, buf), warn = [];
+    const wb = new ExcelJS.Workbook(); await wb.xlsx.load(buf);
+    const find = (re) => wb.worksheets.find((w) => re.test(w.name));
+    const v1 = vacHoja(find(/^3\s*vac/i), 'V', warn), v2 = vacHoja(find(/^4\s*vac/i), '2V', warn);
+    const vac = {}; for (const cod of new Set(Object.keys(v1).concat(Object.keys(v2)))) vac[cod] = Object.assign({}, v1[cod], v2[cod]);
+    const personas = {}; const cd = find(/^2\s*ciclo/i);
+    if (cd) for (let c = 10; c <= cd.columnCount; c++) { const cod = num(cd.getRow(2).getCell(c).value), n = num(cd.getRow(1).getCell(c).value); if (cod !== null && n !== null) personas[cod] = n; }
+    return Object.assign(r, { vac, personas, warn });
+  }
+  /** Lee el Excel de la empresa (hoja "1 Turnos": fecha en A, necesarios en F). */
+  async function readEmpresaNecesarios(ExcelJS, buf) {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const ws = wb.worksheets.find((w) => w.name.toLowerCase().replace(/\s+/g, ' ').includes('turnos'));
+    if (!ws) throw new Error('No encuentro la hoja "1 Turnos" en ese Excel');
+    const nec = {}; let n = 0;
+    for (let r = 2; r <= ws.rowCount; r++) {
+      const d = isoFrom(ws.getRow(r).getCell(1).value), v = num(ws.getRow(r).getCell(6).value);
+      if (d && v !== null) { nec[d] = v; n++; }
+    }
+    if (!n) throw new Error('La hoja "1 Turnos" no tiene necesarios en la columna F');
+    let abs = null;
+    const cd = wb.worksheets.find((w) => /ciclo/i.test(w.name));
+    if (cd) { const a = num(cd.getCell('B2').value); if (a && a > 0) abs = pct(a); }
+    return { nec, dias: n, abs };
+  }
 
   /** Lee la plantilla (ArrayBuffer) y devuelve el estado. */
   async function readPlantilla(ExcelJS, buf) {
@@ -1158,11 +1366,14 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       if (k.startsWith('año')) st.year = v;
       else if (k.includes('trabajo')) st.cfg.work = v;
       else if (k.includes('descanso') && !k.includes('14')) st.cfg.rest = v;
+      else if (k.startsWith('absentismo base')) st.cfg.absBase = pct(v);
+      else if (k.startsWith('absentismo')) st.cfg.absPrueba = pct(v);
       else if (k.includes('seguidos')) st.cfg.maxRun = v;
       else if (k.includes('14')) st.cfg.min14 = v;
     }
     if (!st.year) throw new Error('La hoja Config no tiene el año');
-    st.cfg = Object.assign({ work: 205, rest: 160, maxRun: 6, min14: 3 }, st.cfg);
+    st.cfg = Object.assign({ work: 205, rest: 160, maxRun: 6, min14: 3, absBase: 0.06 }, st.cfg);
+    if (st.cfg.absPrueba == null) st.cfg.absPrueba = st.cfg.absBase;
     const nd = C.yearDays(st.year).length;
     if (st.cfg.work + st.cfg.rest !== nd) warn.push(`Config: ${st.cfg.work} de trabajo + ${st.cfg.rest} de descanso no suman los ${nd} días de ${st.year}.`);
 
@@ -1177,7 +1388,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       const id = str(r[0]); if (!id) continue;
       const fe = str(r[4]).toLowerCase();
       st.colectivos.push({ id, title: str(r[1]) || id, balance: r[2] === null ? true : yes(str(r[2])), turnos: yes(str(r[5])), hasta: isoFrom(r[6]) || null,
-        file: str(r[3]) || id.replace(/[^\w-]/g, ''), festivos: fe.startsWith('ajust') || fe.startsWith('nece') ? 'nec' : fe.startsWith('cubr') ? 'min' : fe.startsWith('tod') ? 'all' : 'rot' });
+        file: str(r[3]) || id.replace(/[^\w-]/g, ''), ajuste: /^compl/i.test(str(r[7])) ? 'completo' : /^senc/i.test(str(r[7])) ? 'sencillo' : '', ajusteMax: num((str(r[7]).match(/\d+/) || [null])[0]) || null, festivos: fe.startsWith('ajust') || fe.startsWith('nece') ? 'nec' : fe.startsWith('cubr') ? 'min' : fe.startsWith('tod') ? 'all' : 'rot' });
     }
     const keys = new Set();
     for (const r of rows(sheet('Grupos'))) {
@@ -1297,7 +1508,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       ['Se abre con la app "Calendarios EMB", que genera, deja modificar y exporta los calendarios.', false],
       ['', false],
       ['Qué hay en cada hoja', true],
-      ['Config: año y reglas del convenio. Trabajo + descanso deben sumar los días del año (365 o 366).', false],
+      ['Config: año y reglas del convenio. Trabajo + descanso deben sumar los días del año (365 o 366). Absentismo base = el que ya llevan los necesarios de la empresa (6 %); Absentismo a probar = escenario para calcular la bolsa.', false],
       ['Ciclos: forma de cada rotación, semana a semana de lunes a domingo. T = trabajo, D = franqueo (M y T = mañana y tarde en los colectivos con turnos).', false],
       ['Colectivos: título de los PDF ({AÑO} se sustituye), si la app cuadra los descansos al objetivo y cómo se reparten los festivos.', false],
       ['Grupos: una fila por letra. "Semana inicial" = semana del ciclo en la que cae la semana del 1 de enero.', false],
@@ -1310,7 +1521,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       txt.push(['', false], ['ANTES DE ABRIRLA EN LA APP', true],
         ['1. Festivos: revisa las fechas marcadas "Revisar" (Semana Santa y Semana Grande se han calculado).', false],
         ['2. Vacaciones: pon los periodos de cada letra para este año (la hoja viene vacía).', false],
-        ['3. Necesarios: vienen copiados del mismo día de la semana del año anterior; sustitúyelos por los de "1 Turnos".', false],
+        ['3. Excel de la empresa (100% y 50%): en la app, pestaña Cobertura > "Importar Excel de la empresa". Lee solos los necesarios por día (hoja "1 Turnos", fecha en A y necesarios en F), las vacaciones (hojas "3 Vacaciones" y "4 Vacaciones adicionales") y las personas por grupo. Después pulsa "Generar desde la rotación y ajustar": continúa la rotación del año anterior (semana inicial de la hoja Grupos) y ajusta los franqueos a los necesarios con el método de la hoja Colectivos (columna Ajuste).', false],
         ['4. Grupos: ajusta personas por grupo si han cambiado. La semana inicial ya está calculada.', false]);
     }
     txt.push(['', false], ['Texto azul = dato de entrada.', false]);
@@ -1319,10 +1530,13 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const blue = font({ color: { argb: 'FF0000FF' } });
 
     const cf = wb.addWorksheet('Config');
-    header(cf, 1, ['Parámetro', 'Valor'], [32, 10]);
+    header(cf, 1, ['Parámetro', 'Valor'], [46, 10]);
     [['Año', st.year], ['Días de trabajo', st.cfg.work], ['Días de descanso', st.cfg.rest],
-     ['Máximo días seguidos', st.cfg.maxRun], ['Mínimo descansos cada 14 días', st.cfg.min14]].forEach(([k, v], i) => {
+     ['Máximo días seguidos', st.cfg.maxRun], ['Mínimo descansos cada 14 días', st.cfg.min14],
+     ['Absentismo base de los necesarios de la empresa', st.cfg.absBase != null ? st.cfg.absBase : 0.06],
+     ['Absentismo a probar', st.cfg.absPrueba != null ? st.cfg.absPrueba : (st.cfg.absBase != null ? st.cfg.absBase : 0.06)]].forEach(([k, v], i) => {
       cf.getCell(i + 2, 1).value = k; cf.getCell(i + 2, 2).value = v; cf.getCell(i + 2, 2).font = blue;
+      if (i >= 5) cf.getCell(i + 2, 2).numFmt = '0%';
     });
     const cy = wb.addWorksheet('Ciclos');
     header(cy, 1, ['Ciclo', 'Semanas', 'Patrón (L M X J V S D por semana)', 'Descripción'], [8, 9, 52, 60]);
@@ -1332,10 +1546,10 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       cy.getCell(i + 2, 3).font = blue;
     });
     const co = wb.addWorksheet('Colectivos');
-    header(co, 1, ['Colectivo', 'Título', 'Cuadrar a objetivo', 'Nombre de archivo', 'Festivos', 'Turnos M/T', 'Hasta'], [11, 42, 11, 18, 14, 11, 12]);
+    header(co, 1, ['Colectivo', 'Título', 'Cuadrar a objetivo', 'Nombre de archivo', 'Festivos', 'Turnos M/T', 'Hasta', 'Ajuste a necesarios'], [11, 42, 11, 18, 14, 11, 12, 20]);
     const FEST = { nec: 'Ajustar a necesarios', min: 'Cubrir necesarios', rot: 'Rotación', all: 'Todos libran' };
-    st.colectivos.forEach((c, i) => { co.getRow(i + 2).values = [c.id, c.title, c.balance ? 'Sí' : 'No', c.file, FEST[c.festivos || 'rot'], c.turnos ? 'Sí' : 'No', null]; if (c.hasta) dateCell(co.getCell(i + 2, 7), c.hasta); });
-    co.getColumn(9).width = 90; co.getCell(1, 9).value = 'Notas'; co.getCell(1, 9).font = font({ bold: true }); co.getCell(2, 9).value = 'Festivos — Rotación: trabaja quien le toca. Cubrir necesarios: además, si no se llega, se llama a gente que tenía franqueo. Ajustar a necesarios: se cubre y libran (FNR) los que sobran. Todos libran. Un franqueo que cae en festivo pasa siempre a FNR. Turnos M/T: Sí para interinos (M = mañana y T = tarde cuentan como trabajo, sin objetivo anual de días). Hasta: última fecha que sale en los PDF y en el Excel (vacío = todo el año).';
+    st.colectivos.forEach((c, i) => { co.getRow(i + 2).values = [c.id, c.title, c.balance ? 'Sí' : 'No', c.file, FEST[c.festivos || 'rot'], c.turnos ? 'Sí' : 'No', null, c.ajuste ? `${c.ajuste === 'completo' ? 'Completo' : 'Sencillo'} ${c.ajusteMax || (c.ajuste === 'completo' ? 12 : 6)}` : null]; if (c.hasta) dateCell(co.getCell(i + 2, 7), c.hasta); });
+    co.getColumn(9).width = 90; co.getCell(1, 9).value = 'Notas'; co.getCell(1, 9).font = font({ bold: true }); co.getCell(2, 9).value = 'Festivos — Rotación: trabaja quien le toca. Cubrir necesarios: además, si no se llega, se llama a gente que tenía franqueo. Ajustar a necesarios: se cubre y libran (FNR) los que sobran. Todos libran. Un franqueo que cae en festivo pasa siempre a FNR. Turnos M/T: Sí para interinos (M = mañana y T = tarde cuentan como trabajo, sin objetivo anual de días). Hasta: última fecha que sale en los PDF y en el Excel (vacío = todo el año). Ajuste a necesarios: vacío = no se ajusta; Sencillo 6 = mueve hasta 6 franqueos por grupo de días con exceso a días con falta; Completo 12 = búsqueda más a fondo (hasta 12 por grupo) que además quita los franqueos sueltos de 1 día.';
     const gr = wb.addWorksheet('Grupos');
     header(gr, 1, ['Colectivo', 'Letra', 'Franqueo', 'Grupo', 'Personas', 'Ciclo', 'Semana inicial', 'Matrícula'], [11, 9, 10, 8, 10, 8, 10, 11]);
     st.groups.forEach((g, i) => {
@@ -1527,6 +1741,24 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       ws.pageSetup = { orientation: 'landscape', paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1 };
     });
     void info;
+    if (Object.values(st.nec[col] || {}).some((x) => x > 0)) {
+      const bo = wb.addWorksheet('Bolsa');
+      bo.getCell('A1').value = `${titulo} — conductores de bolsa necesarios cada día, por mes`; bo.getCell('A1').font = font({ bold: true, size: 13 });
+      const base = st.cfg.absBase != null ? st.cfg.absBase : 0.06;
+      bo.getCell('A2').value = `Necesarios de la empresa con ${Math.round(base * 100)} % de absentismo ya incluido. Otros % = escalado proporcional (estimación, no cifra de la empresa).`; bo.getCell('A2').font = font({ italic: true, size: 9 });
+      let rr = 4;
+      for (const ab of [0.06, 0.07, 0.08, 0.09, 0.10]) {
+        const b = C.bolsaMensual(st, col, ab);
+        bo.getCell(rr, 1).value = `Absentismo ${Math.round(ab * 100)} %`; bo.getCell(rr, 1).font = font({ bold: true });
+        ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic','Año'].forEach((h, k) => { const c = bo.getCell(rr, k + 2); c.value = h; c.font = font({ bold: true }); c.fill = fill('BDEBF2'); c.alignment = center; c.border = box; });
+        [['Bolsa media al día', 'media', 1], ['Día más cargado', 'pico', 0], ['Días con falta', 'dias', 0]].forEach(([lab, k, dec], q) => {
+          bo.getCell(rr + 1 + q, 1).value = lab;
+          b.meses.concat([b.total]).forEach((x, m) => { const c = bo.getCell(rr + 1 + q, m + 2); c.value = Math.round(x[k] * 10 ** dec) / 10 ** dec; c.alignment = center; c.border = box; c.font = font(); });
+        });
+        rr += 6;
+      }
+      bo.getColumn(1).width = 22; for (let c = 2; c <= 14; c++) bo.getColumn(c).width = 8;
+    }
     return wb.xlsx.writeBuffer();
   }
 
@@ -1630,7 +1862,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
   }
 
-  const api = { readPlantilla, writePlantilla, excelColectivo, pdfGroup, zipPdfs, fileOf, titleOf, isoFrom };
+  const api = { readEmpresa, readEmpresaNecesarios, readPlantilla, writePlantilla, excelColectivo, pdfGroup, zipPdfs, fileOf, titleOf, isoFrom };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.IO = api;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -1913,6 +2145,107 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     }
   }
 
+  // ---------- ajuste a necesarios ----------
+  function ajusteHtml() {
+    const n = ((st.ajustes || {})[cur.col] || []).length, info = st.colectivos.find((c) => c.id === cur.col) || {};
+    const ex = C.coverage(st, cur.col).filter((d) => d.necesarios > 0).map((d) => d.trabajan - d.necesarios * C.absFactor(st));
+    const mx = Math.round(Math.max(0, ...ex)), d20 = ex.filter((x) => x >= 20).length, met = info.ajuste || '';
+    return `<h3>Generar y ajustar a los necesarios de cada día</h3>
+      <p class="hint"><button type="button" class="btn" id="impEmp2">Importar Excel de la empresa</button>
+      (necesarios por día, vacaciones y personas por grupo: hojas "1 Turnos", "3 Vacaciones", "4 Vacaciones adicionales" y "2 Ciclo Descansos").</p>
+      <p class="hint">Hoy el día en que más sobra gente es de <b>${mx}</b> conductores (${d20} días con 20 o más de sobra). El ajuste mueve franqueos de días con mucha gente a días con falta,
+      dentro de cada grupo (mismos días de trabajo y descanso, vacaciones y festivos intactos).
+      Método: <select id="adjMet"><option value="" ${met === '' ? 'selected' : ''}>Sin ajuste</option><option value="sencillo" ${met === 'sencillo' ? 'selected' : ''}>Sencillo</option><option value="completo" ${met === 'completo' ? 'selected' : ''}>Completo (quita también franqueos sueltos)</option></select>
+      Máx. <input id="adjMax" type="number" min="1" max="40" step="1" value="${info.ajusteMax || (met === 'completo' ? 12 : 6)}"> cambios por grupo.
+      <button type="button" class="btn primary" id="genAdj">Generar desde la rotación y ajustar ${h(cur.col)}</button>
+      <button type="button" class="btn" id="adjGo">Ajustar el calendario actual</button>
+      ${n ? `<button type="button" class="btn" id="adjUndo">Deshacer el ajuste (${n} cambios)</button>` : ''}</p>`;
+  }
+  async function doAdjust() {
+    const info = st.colectivos.find((c) => c.id === cur.col);
+    if (!info.ajuste) { toast('Elige antes el método de ajuste (sencillo o completo)', 'bad'); return; }
+    busy(`Ajustando ${cur.col}…`); await tick();
+    try {
+      const f = (c) => { const e = c.filter((d) => d.necesarios > 0).map((d) => d.trabajan - d.necesarios * C.absFactor(st)); return { mx: Math.max(0, ...e) }; };
+      const a = f(C.coverage(st, cur.col));
+      const r = info.ajuste === 'completo' ? C.adjustComplete(st, cur.col, { maxPerGroup: info.ajusteMax || 12 }) : C.adjustToNeed(st, cur.col, { maxPerGroup: info.ajusteMax || 6 });
+      const b = f(C.coverage(st, cur.col));
+      saveLocal(); render();
+      toast(`${r.swaps} cambios${r.error ? ' (' + r.error + ')' : ''}. Máximo que sobra en un día: ${Math.round(a.mx)} → ${Math.round(b.mx)}. Quedan listados en la hoja Cambios.`, r.error ? 'bad' : 'ok');
+    } catch (e) { console.error(e); toast(`No se ha podido ajustar: ${e.message}`, 'bad'); } finally { busy(); }
+  }
+
+  // ---------- bolsa ----------
+  function bolsaHtml() {
+    const base = st.cfg.absBase != null ? st.cfg.absBase : 0.06, ab = st.cfg.absPrueba != null ? st.cfg.absPrueba : base;
+    const b = C.bolsaMensual(st, cur.col, ab), pct = (x) => Math.round(x * 1000) / 10;
+    const esc = [0.06, 0.07, 0.08, 0.09, 0.10].map((a) => ({ a, b: C.bolsaMensual(st, cur.col, a) }));
+    const f1 = (x) => (Math.round(x * 10) / 10).toString().replace('.', ',');
+    return `<h3>Conductores de bolsa necesarios cada día, por mes</h3>
+      <p class="hint">Los necesarios de la empresa ya llevan un <input id="absBase" type="number" min="0" max="30" step="0.5" value="${pct(base)}"> % de absentismo.
+      Absentismo a probar: <input id="absPrueba" type="number" min="0" max="30" step="0.5" value="${pct(ab)}"> %
+      (otros % = escalado proporcional, estimación propia).</p>
+      <table class="cob"><thead><tr><th scope="col">Mes</th><th scope="col">Conductores de bolsa, media al día</th><th scope="col">Día más cargado</th><th scope="col">Días con falta</th></tr></thead>
+      <tbody>${b.meses.map((x, m) => `<tr><th scope="row">${MES[m]}</th><td class="num">${f1(x.media)}</td><td class="num">${Math.round(x.pico)}</td><td class="num">${x.dias}</td></tr>`).join('')}
+      <tr><th scope="row">Año</th><td class="num">${f1(b.total.media)}</td><td class="num">${Math.round(b.total.pico)}</td><td class="num">${b.total.dias}</td></tr></tbody></table>
+      <h3>Escenarios de absentismo (bolsa media al día)</h3>
+      <table class="cob"><thead><tr><th scope="col">%</th>${MES.map((m) => `<th scope="col">${m.slice(0, 3)}</th>`).join('')}<th scope="col">Día más cargado</th></tr></thead>
+      <tbody>${esc.map((e) => `<tr><th scope="row">${Math.round(e.a * 100)} %</th>${e.b.meses.map((x) => `<td class="num">${f1(x.media)}</td>`).join('')}<td class="num">${Math.round(e.b.total.pico)}</td></tr>`).join('')}</tbody></table>`;
+  }
+  async function importEmp(file) {
+    if (!file) return;
+    busy('Leyendo el Excel de la empresa…');
+    let r;
+    try {
+      r = await IO.readEmpresa(window.ExcelJS, await file.arrayBuffer());
+      const ys = String(st.year); let n = 0;
+      const nec = {};
+      for (const [d, v] of Object.entries(r.nec)) if (d.startsWith(ys)) { nec[d] = v; n++; }
+      if (!n) throw new Error(`Ese Excel no tiene fechas de ${st.year}`);
+      // un festivo con 0 necesarios casi siempre es un error del Excel (p. ej. el 25/12): se usa el menor de los demás festivos
+      const fv = Object.keys(st.festivos).filter((d) => d.startsWith(ys));
+      const ref = Math.min(...fv.map((d) => nec[d]).filter((v) => v > 0), Infinity), arreglados = [];
+      if (isFinite(ref)) fv.forEach((d) => { if (nec[d] === 0) { nec[d] = ref; arreglados.push(C.fmt(d).slice(0, 5)); } });
+      st.nec[cur.col] = nec; st.necEstimados = false;
+      const msgs = [`${n} días de necesarios`];
+      if (arreglados.length) msgs.push(`festivo(s) con 0 necesarios (${arreglados.join(', ')}) puestos a ${ref}, como los demás festivos`);
+      const gs = C.groupsOf(st, cur.col); let cambiosCal = false;
+      const hayVac = Object.keys(r.vac).length > 0;
+      if (hayVac) {
+        let nv = 0;
+        for (const g of gs) {
+          const v = r.vac[g.grupo]; if (!v) continue;
+          const mine = {}; for (const [d, t] of Object.entries(v)) if (d.startsWith(ys)) mine[d] = t;
+          const k = C.key(g.col, g.letra);
+          if (JSON.stringify(st.vac[k] || {}) !== JSON.stringify(mine)) { st.vac[k] = mine; nv++; }
+        }
+        msgs.push(nv ? `vacaciones cambiadas en ${nv} grupos` : 'vacaciones sin cambios');
+        if (nv) cambiosCal = true;
+      }
+      let np = 0;
+      for (const g of gs) { const p = r.personas[g.grupo]; if (p != null && p !== g.personas) { g.personas = p; np++; } }
+      if (np) msgs.push(`personas cambiadas en ${np} grupos`);
+      const ceros = Object.entries(nec).filter(([, v]) => !v).map(([d]) => C.fmt(d).slice(0, 5));
+      if (ceros.length) msgs.push(`ojo: ${ceros.length} día(s) con 0 necesarios (${ceros.slice(0, 4).join(', ')})`);
+      if (r.warn.length) msgs.push(r.warn.slice(0, 2).join('; '));
+      saveLocal(); render();
+      toast(`Importado en ${cur.col}: ${msgs.join('; ')}.`, 'ok');
+      if (cambiosCal && confirm('Las vacaciones o las personas han cambiado. ¿Generar ahora el calendario desde la rotación y ajustarlo? (se descartan los cambios a mano de este colectivo)')) { busy(null); await generarAjustar(false); return; }
+    } catch (e) { console.error(e); toast(`No se ha podido importar: ${e.message}`, 'bad'); } finally { busy(); }
+  }
+  async function generarAjustar(ask) {
+    if (ask !== false && !confirm(`Se vuelve a generar ${cur.col} desde la rotación y se descartan los cambios a mano de este colectivo. ¿Seguir?`)) return;
+    const info = st.colectivos.find((c) => c.id === cur.col);
+    busy(`Generando y ajustando ${cur.col}…`); await tick();
+    try {
+      const f = () => { const e = C.coverage(st, cur.col).filter((d) => d.necesarios > 0).map((d) => d.trabajan - d.necesarios * C.absFactor(st)); return { mx: Math.max(0, ...e), fal: e.reduce((s, x) => s + Math.max(0, -x), 0) }; };
+      const r = C.generateAndAdjust(st, cur.col), b = f();
+      saveLocal(); render();
+      const bad = C.groupsOf(st, cur.col).filter((g) => C.validateGroup(st, g).issues.length).length;
+      toast(`${cur.col} generado${info.ajuste ? ` y ajustado (${info.ajuste}, ${r.swaps} cambios${r.error ? ', ' + r.error : ''})` : ''}. Máximo que sobra en un día: ${Math.round(b.mx)}.${bad ? ` ${bad} grupos con avisos.` : ''}`, bad ? 'bad' : 'ok');
+    } catch (e) { console.error(e); toast(`No se ha podido generar: ${e.message}`, 'bad'); } finally { busy(); }
+  }
+
   // ---------- cobertura ----------
   function renderCoverage() {
     const cov = C.coverage(st, cur.col);
@@ -1924,22 +2257,37 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         if (!byM[m].peor || d.diff < byM[m].peor.diff) byM[m].peor = d;
       }
     }
-    const tot = byM.reduce((s, x) => s + x.falta, 0), dias = byM.reduce((s, x) => s + x.dias, 0);
+    const tot = byM.reduce((s, x) => s + x.falta, 0), maxDia = Math.max(0, ...cov.map((d) => -d.diff)), dias = byM.reduce((s, x) => s + x.dias, 0);
     const worst = cov.filter((d) => d.diff < 0).sort((a, b) => a.diff - b.diff).slice(0, 12);
-    const max = Math.max(1, ...byM.map((x) => x.falta));
+    const ndm = (m) => new Date(Date.UTC(st.year, m + 1, 0)).getUTCDate(), mediaM = byM.map((x, m) => x.falta / ndm(m)), max = Math.max(1, ...mediaM);
     $('#viewCob').innerHTML = `<section class="panel">
       <header class="ghead"><div><h2>Cobertura de ${h(cur.col)}</h2>
-      <p>Personas que trabajan cada día frente a los necesarios de la plantilla. Lo que falta es lo que hay que cubrir con bolsa o contratación.</p></div></header>
+      <p>Conductores que trabajan cada día frente a los necesarios de la plantilla. Lo que falta cada día es lo que hay que cubrir con bolsa o contratación.</p></div></header>
       <div class="stats">
-        <div class="stat ${tot ? 'bad' : 'ok'}"><span>Personas-día que faltan en el año</span><strong>${tot}</strong></div>
+        <div class="stat ${tot ? 'bad' : 'ok'}"><span>Máximo que falta en un solo día (conductores)</span><strong>${maxDia}</strong></div>
         <div class="stat"><span>Días con falta</span><strong>${dias}</strong></div>
       </div>
-      <table class="cob"><thead><tr><th scope="col">Mes</th><th scope="col">Personas-día que faltan</th><th scope="col">Días con falta</th><th scope="col">Peor día</th></tr></thead>
+      <table class="cob"><thead><tr><th scope="col">Mes</th><th scope="col">Faltan de media cada día</th><th scope="col">Días con falta</th><th scope="col">Peor día</th></tr></thead>
       <tbody>${byM.map((x, m) => `<tr><th scope="row">${MES[m]}</th>
-        <td><span class="bar" style="--w:${(100 * x.falta / max).toFixed(1)}%"></span><span class="num">${x.falta}</span></td>
+        <td><span class="bar" style="--w:${(100 * mediaM[m] / max).toFixed(1)}%"></span><span class="num">${(Math.round(mediaM[m] * 10) / 10).toString().replace('.', ',')}</span></td>
         <td class="num">${x.dias}</td>
         <td>${x.peor ? `${C.fmt(x.peor.iso)}: trabajan ${x.peor.trabajan} de ${x.peor.necesarios}` : '—'}</td></tr>`).join('')}</tbody></table>
+      ${ajusteHtml()}
+      ${bolsaHtml()}
       ${worst.length ? `<h3>Días con más falta</h3><ul class="worst">${worst.map((d) => `<li><b>${WD[C.weekday(d.iso)]} ${C.fmt(d.iso)}</b> faltan ${-d.diff} (trabajan ${d.trabajan} de ${d.necesarios})</li>`).join('')}</ul>` : ''}</section>`;
+    bindBolsa();
+  }
+
+  function bindBolsa() {
+    const v = $('#viewCob'), set = (id, k) => { const el = v.querySelector(id); if (el) el.onchange = () => { const x = parseFloat(el.value); if (!isNaN(x) && x >= 0 && x <= 30) { st.cfg[k] = x / 100; saveLocal(); renderCoverage(); } }; };
+    set('#absBase', 'absBase'); set('#absPrueba', 'absPrueba');
+    const go = v.querySelector('#adjGo'); if (go) go.onclick = doAdjust;
+    const ga = v.querySelector('#genAdj'); if (ga) ga.onclick = () => generarAjustar(true);
+    const i2 = v.querySelector('#impEmp2'), f2 = $('#fileEmp'); if (i2 && f2) i2.onclick = () => f2.click();
+    const saveMet = () => { const info = st.colectivos.find((c) => c.id === cur.col); info.ajuste = v.querySelector('#adjMet').value; info.ajusteMax = Math.max(1, parseInt(v.querySelector('#adjMax').value, 10) || (info.ajuste === 'completo' ? 12 : 6)); saveLocal(); };
+    const am = v.querySelector('#adjMet'); if (am) { am.onchange = () => { saveMet(); const mx = v.querySelector('#adjMax'); if (mx) { mx.value = am.value === 'completo' ? 12 : 6; saveMet(); } }; v.querySelector('#adjMax').onchange = saveMet; }
+    const un = v.querySelector('#adjUndo'); if (un) un.onclick = () => { const n = C.revertAdjust(st, cur.col); saveLocal(); render(); toast(`Ajuste deshecho (${n} cambios)`, 'ok'); };
+    const f = $('#fileEmp'); if (f) f.onchange = () => { importEmp(f.files[0]); f.value = ''; };
   }
 
   // ---------- exportaciones ----------
