@@ -8,7 +8,6 @@
 <meta name="theme-color" content="#0f6e7c">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
-<meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="description" content="Genera, revisa y exporta los calendarios de franqueos a partir de la plantilla anual.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -721,6 +720,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   const VALUES_TURNOS = ['M', 'T', 'D', 'V', '2V', 'FNR']; // colectivos con turnos (interinos): M mañana, T tarde
   const ALLVALUES = ['M', 'T', 'D', 'V', '2V', 'FNR'];
   const isW = (v) => v === 'T' || v === 'M'; // día de trabajo
+  /** Cuenta para cubrir necesarios: si el colectivo sustituye vacaciones (contratan a otro), el que está de vacaciones cuenta como cubierto. */
+  const isCov = (st, col, v) => isW(v) || ((v === 'V' || v === '2V') && !!((st.colectivos || []).find((c) => c.id === col) || {}).vacSust);
 
   // ---------- fechas (todo en UTC, como cadenas ISO AAAA-MM-DD) ----------
   const isoOf = (t) => new Date(t).toISOString().slice(0, 10);
@@ -1013,7 +1014,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   function coverage(st, col) {
     const days = yearDays(st.year), gs = groupsOf(st, col), nec = st.nec[col] || {};
     return days.map((iso, i) => {
-      const t = gs.reduce((s, g) => s + (isW((st.cal[key(g.col, g.letra)] || [])[i]) ? g.personas : 0), 0);
+      const t = gs.reduce((s, g) => s + (isCov(st, col, (st.cal[key(g.col, g.letra)] || [])[i]) ? g.personas : 0), 0);
       return { iso, trabajan: t, necesarios: nec[iso] || 0, diff: t - (nec[iso] || 0) };
     });
   }
@@ -1047,7 +1048,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     if ((colectivoInfo(st, col) || {}).turnos) return { swaps: 0, changes: [] };
     const nec = days.map((d) => (nec0[d] || 0) * f);
     const seqOf = (g) => st.cal[key(g.col, g.letra)];
-    const work = days.map((d, i) => gs.reduce((s, g) => s + (isW(seqOf(g)[i]) ? g.personas : 0), 0));
+    const work = days.map((d, i) => gs.reduce((s, g) => s + (isCov(st, col, seqOf(g)[i]) ? g.personas : 0), 0));
     const fest = days.map((d) => !!st.festivos[d]);
     const single = (seq, i) => {
       for (const j of [i - 1, i, i + 1]) {
@@ -1122,7 +1123,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       const mov = []; for (let i = 0; i < N; i++) if ((seq[i] === 'T' || seq[i] === 'D') && !st.festivos[days[i]] && !vac[days[i]] && !lock[days[i]]) mov.push(i);
       return { g, k, seq, pre: prefixOf(st, g), p: g.personas, orig: seq.slice(), mov, ch: 0 };
     });
-    const work = days.map((d, i) => G.reduce((s, x) => s + (isW(x.seq[i]) ? x.p : 0), 0));
+    const work = days.map((d, i) => G.reduce((s, x) => s + (isCov(st, col, x.seq[i]) ? x.p : 0), 0));
     const cost = (i, w) => { const e = w - nec[i]; return e >= 0 ? 10 * e + 30 * Math.max(0, e - 10) + (e > 19 ? 1000 * (e - 19) : 0) : -10 * e; };
     const singleAt = (seq, j) => { if (j < 0 || j >= N || seq[j] !== 'D') return 0; const l = j > 0 && !isW(seq[j - 1]), r = j < N - 1 && !isW(seq[j + 1]); return !l && !r ? 1 : 0; };
     const sing = (seq, i) => { let n = 0; for (let j = i - 2; j <= i + 2; j++) n += singleAt(seq, j); return n; };
@@ -1171,6 +1172,61 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     return { swaps: 0, changes: [] };
   }
   function gsClear(st, col) { groupsOf(st, col).forEach((g) => { st.locked[key(g.col, g.letra)] = {}; }); }
+
+  // ---------- optimización: el mejor calendario para la empresa cumpliendo todas las reglas ----------
+  function calMap(st, col, which) {
+    const m = {};
+    groupsOf(st, col).forEach((g) => { const k = key(g.col, g.letra); m[k] = which === 'gen' ? st.gen[k] : which === 'opt' ? ((st.opt || {})[col] || {})[k] : st.cal[k]; });
+    return m;
+  }
+  function gapStats(st, col, m) {
+    const days = yearDays(st.year), gs = groupsOf(st, col), nec0 = st.nec[col] || {}, f = absFactor(st);
+    const ex = days.map((d, i) => gs.reduce((s, g) => s + (isCov(st, col, m[key(g.col, g.letra)][i]) ? g.personas : 0), 0) - Math.round((nec0[d] || 0) * f));
+    const ok = days.map((d, i) => (nec0[d] || 0) > 0);
+    const e = ex.filter((x, i) => ok[i]);
+    return { maxSobra: Math.max(0, ...e), maxFalta: Math.max(0, ...e.map((x) => -x)), ge20: e.filter((x) => x >= 20).length, ge10: e.filter((x) => x >= 10).length,
+      diasSobra: e.filter((x) => x > 0).length, diasFalta: e.filter((x) => x < 0).length,
+      sobra: e.reduce((s, x) => s + Math.max(0, x), 0), falta: e.reduce((s, x) => s + Math.max(0, -x), 0), ex };
+  }
+  function checkRules(st, col, m) {
+    const tmp = Object.assign({}, st, { cal: Object.assign({}, st.cal, m) }), gs = groupsOf(st, col);
+    let issues = 0, bad = 0, maxRun = 0, min14 = 99, singles = 0, tMin = 999, tMax = 0, rMin = 999, rMax = 0;
+    for (const g of gs) {
+      const v = validateGroup(tmp, g); if (v.issues.length) { bad++; issues += v.issues.length; }
+      maxRun = Math.max(maxRun, v.maxRun); min14 = Math.min(min14, v.min14);
+      tMin = Math.min(tMin, v.counts.T); tMax = Math.max(tMax, v.counts.T); rMin = Math.min(rMin, v.rest); rMax = Math.max(rMax, v.rest);
+      const s = m[key(g.col, g.letra)];
+      s.forEach((x, i) => { if (i < s.length - 1 && x === 'D' && !(i > 0 && !isW(s[i - 1])) && !isW(s[i + 1]) === false) singles++; });  // el 31/12 no cuenta: depende del año siguiente
+    }
+    return { grupos: gs.length, gruposConFallos: bad, fallos: issues, maxRun, min14, singles, trabajo: [tMin, tMax], descanso: [rMin, rMax] };
+  }
+  function optimizeCopy(st, col, opts) {
+    const tmp = JSON.parse(JSON.stringify(st)); tmp.opt = {}; tmp.ajustes = {};
+    const r = adjustComplete(tmp, col, { maxPerGroup: 365, iter: (opts && opts.iter) || 60000000 });
+    if (r.error) return r;
+    st.opt = st.opt || {}; st.opt[col] = {};
+    groupsOf(st, col).forEach((g) => { const k = key(g.col, g.letra); st.opt[col][k] = tmp.cal[k].slice(); });
+    return r;
+  }
+  function relock(st, g) {
+    const k = key(g.col, g.letra), days = yearDays(st.year), lk = {};
+    st.cal[k].forEach((v, i) => { if (!st.gen[k] || st.gen[k][i] !== v) lk[days[i]] = v; });
+    st.locked[k] = lk;
+  }
+  function applyOpt(st, col) {
+    const o = (st.opt || {})[col]; if (!o) return 0;
+    st.optPrev = st.optPrev || {}; st.optPrev[col] = calMap(st, col, 'cal');
+    Object.keys(st.optPrev[col]).forEach((k) => { st.optPrev[col][k] = st.optPrev[col][k].slice(); });
+    groupsOf(st, col).forEach((g) => { const k = key(g.col, g.letra); st.cal[k] = o[k].slice(); relock(st, g); });
+    st.ajustes = st.ajustes || {}; st.ajustes[col] = [];
+    return groupsOf(st, col).length;
+  }
+  function revertOpt(st, col) {
+    const p = (st.optPrev || {})[col]; if (!p) return 0;
+    groupsOf(st, col).forEach((g) => { const k = key(g.col, g.letra); st.cal[k] = p[k].slice(); relock(st, g); });
+    delete st.optPrev[col];
+    return 1;
+  }
 
   // ---------- cambios a mano ----------
   function setValue(st, col, letra, iso, value) {
@@ -1237,8 +1293,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
              cierre: {}, cal: {}, gen: {}, locked: {} };
   }
 
-  const api = { DAY, REST, VALUES, colectivoOf: colectivoInfo, VALUES_TURNOS, ALLVALUES, isW, isoOf, tOf, addDays, weekday, diffDays, yearDays, monday0, fmt, key, easter,
-    groupsOf, baseValue, overlay, generateColectivo, rebalanceGroup, validateGroup, coverage, absFactor, bolsaMensual, adjustToNeed, adjustComplete, revertAdjust, generateAndAdjust, setValue,
+  const api = { isCov, DAY, REST, VALUES, colectivoOf: colectivoInfo, VALUES_TURNOS, ALLVALUES, isW, isoOf, tOf, addDays, weekday, diffDays, yearDays, monday0, fmt, key, easter,
+    groupsOf, baseValue, overlay, generateColectivo, rebalanceGroup, validateGroup, coverage, absFactor, bolsaMensual, adjustToNeed, adjustComplete, revertAdjust, generateAndAdjust, calMap, gapStats, checkRules, optimizeCopy, applyOpt, revertOpt, setValue,
     clearGroupChanges, nextYear, emptyState, localOk, blocks };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Core = api;
@@ -1388,7 +1444,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       const id = str(r[0]); if (!id) continue;
       const fe = str(r[4]).toLowerCase();
       st.colectivos.push({ id, title: str(r[1]) || id, balance: r[2] === null ? true : yes(str(r[2])), turnos: yes(str(r[5])), hasta: isoFrom(r[6]) || null,
-        file: str(r[3]) || id.replace(/[^\w-]/g, ''), ajuste: /^compl/i.test(str(r[7])) ? 'completo' : /^senc/i.test(str(r[7])) ? 'sencillo' : '', ajusteMax: num((str(r[7]).match(/\d+/) || [null])[0]) || null, festivos: fe.startsWith('ajust') || fe.startsWith('nece') ? 'nec' : fe.startsWith('cubr') ? 'min' : fe.startsWith('tod') ? 'all' : 'rot' });
+        file: str(r[3]) || id.replace(/[^\w-]/g, ''), ajuste: /^compl/i.test(str(r[7])) ? 'completo' : /^senc/i.test(str(r[7])) ? 'sencillo' : '', ajusteMax: num((str(r[7]).match(/\d+/) || [null])[0]) || null, vacSust: /^s[ií]/i.test(str(r[9])), festivos: fe.startsWith('ajust') || fe.startsWith('nece') ? 'nec' : fe.startsWith('cubr') ? 'min' : fe.startsWith('tod') ? 'all' : 'rot' });
     }
     const keys = new Set();
     for (const r of rows(sheet('Grupos'))) {
@@ -1453,6 +1509,19 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         else warn.push(`Calendario ${c.id}: la letra ${k.split('|')[1]} tiene días vacíos o raros; se genera de nuevo`);
       }
     }
+    for (const c of st.colectivos) {
+      const ws = sheet(`Optimizado ${c.id}`);
+      if (!ws) continue;
+      const head = []; ws.getRow(1).eachCell({ includeEmpty: true }, (x, i) => { head[i - 1] = str(x.value); });
+      const idx = new Map(days.map((d, i) => [d, i])), tmp = {};
+      for (const r of rows(ws)) {
+        const d = isoFrom(r[0]); if (!idx.has(d)) continue;
+        head.forEach((h, j) => { const k = C.key(c.id, h); if (j < 2 || !keys.has(k)) return; (tmp[k] = tmp[k] || new Array(days.length).fill(null))[idx.get(d)] = str(r[j]).toUpperCase(); });
+      }
+      const ks = Object.keys(tmp);
+      if (ks.length && ks.every((k) => tmp[k].every((x) => C.ALLVALUES.includes(x)))) { st.opt = st.opt || {}; st.opt[c.id] = tmp; }
+      else if (ks.length) warn.push(`Optimizado ${c.id}: tiene días vacíos o raros y se ignora`);
+    }
     for (const r of rows(sheet('Cambios'))) {
       const k = C.key(str(r[0]), str(r[1])), d = isoFrom(r[2]), v = str(r[3]).toUpperCase(), orig = str(r[4]).toUpperCase();
       if (!keys.has(k) || !d || !C.ALLVALUES.includes(v)) continue;
@@ -1515,6 +1584,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       ['Festivos, Vacaciones (una fila por periodo, Tipo V o 2V) y Necesarios por día y colectivo.', false],
       ['Cierre anterior: últimos 14 días del año anterior, para no pasar de los días seguidos en el cambio de año.', false],
       ['Calendario <colectivo>: el calendario generado. Si falta, la app lo genera al abrir la plantilla.', false],
+      ['Optimización y Optimizado <colectivo>: el mejor calendario para la empresa cumpliendo todas las reglas, y su comparación con el original y el actual. La app puede usarlo (pestaña Cobertura).', false],
       ['Cambios: días tocados a mano en la app; se respetan al regenerar.', false],
     ];
     if (!Object.keys(st.cal).length) {
@@ -1546,9 +1616,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       cy.getCell(i + 2, 3).font = blue;
     });
     const co = wb.addWorksheet('Colectivos');
-    header(co, 1, ['Colectivo', 'Título', 'Cuadrar a objetivo', 'Nombre de archivo', 'Festivos', 'Turnos M/T', 'Hasta', 'Ajuste a necesarios'], [11, 42, 11, 18, 14, 11, 12, 20]);
+    header(co, 1, ['Colectivo', 'Título', 'Cuadrar a objetivo', 'Nombre de archivo', 'Festivos', 'Turnos M/T', 'Hasta', 'Ajuste a necesarios', null, 'Vacaciones sustituidas'], [11, 42, 11, 18, 14, 11, 12, 20, 12, 14]);
     const FEST = { nec: 'Ajustar a necesarios', min: 'Cubrir necesarios', rot: 'Rotación', all: 'Todos libran' };
-    st.colectivos.forEach((c, i) => { co.getRow(i + 2).values = [c.id, c.title, c.balance ? 'Sí' : 'No', c.file, FEST[c.festivos || 'rot'], c.turnos ? 'Sí' : 'No', null, c.ajuste ? `${c.ajuste === 'completo' ? 'Completo' : 'Sencillo'} ${c.ajusteMax || (c.ajuste === 'completo' ? 12 : 6)}` : null]; if (c.hasta) dateCell(co.getCell(i + 2, 7), c.hasta); });
+    st.colectivos.forEach((c, i) => { co.getRow(i + 2).values = [c.id, c.title, c.balance ? 'Sí' : 'No', c.file, FEST[c.festivos || 'rot'], c.turnos ? 'Sí' : 'No', null, c.ajuste ? `${c.ajuste === 'completo' ? 'Completo' : 'Sencillo'} ${c.ajusteMax || (c.ajuste === 'completo' ? 12 : 6)}` : null, null, c.vacSust ? 'Sí' : 'No']; if (c.hasta) dateCell(co.getCell(i + 2, 7), c.hasta); });
     co.getColumn(9).width = 90; co.getCell(1, 9).value = 'Notas'; co.getCell(1, 9).font = font({ bold: true }); co.getCell(2, 9).value = 'Festivos — Rotación: trabaja quien le toca. Cubrir necesarios: además, si no se llega, se llama a gente que tenía franqueo. Ajustar a necesarios: se cubre y libran (FNR) los que sobran. Todos libran. Un franqueo que cae en festivo pasa siempre a FNR. Turnos M/T: Sí para interinos (M = mañana y T = tarde cuentan como trabajo, sin objetivo anual de días). Hasta: última fecha que sale en los PDF y en el Excel (vacío = todo el año). Ajuste a necesarios: vacío = no se ajusta; Sencillo 6 = mueve hasta 6 franqueos por grupo de días con exceso a días con falta; Completo 12 = búsqueda más a fondo (hasta 12 por grupo) que además quita los franqueos sueltos de 1 día.';
     const gr = wb.addWorksheet('Grupos');
     header(gr, 1, ['Colectivo', 'Letra', 'Franqueo', 'Grupo', 'Personas', 'Ciclo', 'Semana inicial', 'Matrícula'], [11, 9, 10, 8, 10, 8, 10, 11]);
@@ -1603,6 +1673,53 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         const row = [null, WD[C.weekday(d)]].concat(gs.map((g) => st.cal[C.key(g.col, g.letra)][i]));
         ws.getRow(i + 2).values = row; dateCell(ws.getCell(i + 2, 1), d);
       });
+    }
+    const optCols = st.colectivos.filter((c) => (st.opt || {})[c.id]);
+    if (optCols.length) {
+      const os = wb.addWorksheet('Optimización');
+      os.getCell('A1').value = 'OPTIMIZACIÓN: el mejor calendario para la empresa cumpliendo todas las reglas'; os.getCell('A1').font = font({ bold: true, size: 14 });
+      os.getCell('A2').value = 'Se comparan tres calendarios por colectivo: ORIGINAL (continuación de la rotación del año anterior), ACTUAL (el de la hoja Calendario, con el ajuste a necesarios) y OPTIMIZADO (hoja "Optimizado <colectivo>": el que menos sobra y falta cada día sin salirse de las reglas).';
+      os.getCell('A3').value = 'Todos cumplen lo mismo: 205 de trabajo y 160 de descanso por grupo, máximo 6 días seguidos, al menos 3 descansos en cada 14 días, vacaciones y festivos intactos y sin franqueos sueltos de 1 día. Es una propuesta: no es el cuadrante oficial de EMB.';
+      os.getCell('A2').font = font({ size: 9 }); os.getCell('A3').font = font({ size: 9 });
+      let rr = 5;
+      const hd = (r, labs) => labs.forEach((t, j) => { const c = os.getCell(r, j + 1); c.value = t; c.font = font({ bold: true, color: { argb: 'FFFFFFFF' } }); c.fill = fill('1F3864'); c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }; c.border = box; });
+      for (const c of optCols) {
+        const vs = [['ORIGINAL', 'gen'], ['ACTUAL', 'cal'], ['OPTIMIZADO', 'opt']].map(([n, w]) => { const m = C.calMap(st, c.id, w); return { n, g: C.gapStats(st, c.id, m), r: C.checkRules(st, c.id, m) }; });
+        os.getCell(rr, 1).value = `Colectivo ${c.id}`; os.getCell(rr, 1).font = font({ bold: true, size: 12 }); rr++;
+        hd(rr, ['', 'ORIGINAL', 'ACTUAL', 'OPTIMIZADO']); rr++;
+        const row = (lab, f) => { os.getCell(rr, 1).value = lab; os.getCell(rr, 1).font = font(); vs.forEach((v, j) => { const x = os.getCell(rr, j + 2); x.value = f(v); x.alignment = { horizontal: 'center' }; x.border = box; x.font = font(); }); rr++; };
+        row('Día en que más sobra gente (conductores)', (v) => v.g.maxSobra);
+        row('Días con 20 o más de sobra', (v) => v.g.ge20);
+        row('Días con 10 o más de sobra', (v) => v.g.ge10);
+        row('Días que sobra gente', (v) => v.g.diasSobra);
+        row('Días que falta gente', (v) => v.g.diasFalta);
+        row('Día en que más falta (conductores)', (v) => v.g.maxFalta);
+        row('Suma de lo que sobra (conductores-día)', (v) => v.g.sobra);
+        row('Suma de lo que falta (conductores-día)', (v) => v.g.falta);
+        os.getCell(rr, 1).value = 'Comprobación de reglas'; os.getCell(rr, 1).font = font({ bold: true }); rr++;
+        row('Grupos con algún incumplimiento', (v) => `${v.r.gruposConFallos} de ${v.r.grupos}`);
+        row('Días de trabajo por grupo (mín-máx)', (v) => `${v.r.trabajo[0]}-${v.r.trabajo[1]}`);
+        row('Días de descanso por grupo (mín-máx)', (v) => `${v.r.descanso[0]}-${v.r.descanso[1]}`);
+        row('Máx. días seguidos de trabajo', (v) => v.r.maxRun);
+        row('Mín. descansos en 14 días', (v) => v.r.min14);
+        row('Franqueos sueltos de 1 día', (v) => v.r.singles);
+        rr += 2;
+      }
+      os.getColumn(1).width = 46; [2, 3, 4].forEach((j) => { os.getColumn(j).width = 14; });
+      for (const c of optCols) {
+        const gs = C.groupsOf(st, c.id).filter((g) => (st.opt[c.id] || {})[C.key(g.col, g.letra)]);
+        const ws = wb.addWorksheet(sheetName(`Optimizado ${c.id}`));
+        const extra = ['Necesarios', 'Trabajan optimizado', 'Dif. optimizado', 'Trabajan actual', 'Dif. actual'];
+        header(ws, 1, ['Fecha', 'Día'].concat(gs.map((g) => g.letra), extra), [12, 5].concat(gs.map(() => 6.5), extra.map(() => 11)));
+        ws.views = [{ state: 'frozen', xSplit: 2, ySplit: 1 }];
+        ws.getRow(1).height = 30; ws.getRow(1).alignment = { wrapText: true, horizontal: 'center', vertical: 'middle' };
+        days.forEach((d, i) => {
+          const nec = (st.nec[c.id] || {})[d] || 0;
+          const wo = gs.reduce((s, g) => s + (C.isCov(st, c.id, st.opt[c.id][C.key(g.col, g.letra)][i]) ? g.personas : 0), 0), wa = gs.reduce((s, g) => s + (C.isCov(st, c.id, st.cal[C.key(g.col, g.letra)][i]) ? g.personas : 0), 0);
+          ws.getRow(i + 2).values = [null, WD[C.weekday(d)]].concat(gs.map((g) => st.opt[c.id][C.key(g.col, g.letra)][i]), [nec, wo, wo - nec, wa, wa - nec]);
+          dateCell(ws.getCell(i + 2, 1), d);
+        });
+      }
     }
     const cb = wb.addWorksheet('Cambios');
     header(cb, 1, ['Colectivo', 'Letra', 'Fecha', 'Valor', 'Valor generado', 'Motivo'], [11, 9, 12, 8, 13, 40]);
@@ -2161,6 +2278,26 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       <button type="button" class="btn" id="adjGo">Ajustar el calendario actual</button>
       ${n ? `<button type="button" class="btn" id="adjUndo">Deshacer el ajuste (${n} cambios)</button>` : ''}</p>`;
   }
+  function optHtml() {
+    const has = (st.opt || {})[cur.col], pend = (st.optPrev || {})[cur.col];
+    let tabla = '';
+    if (has) {
+      const vs = [['Original', 'gen'], ['Actual', 'cal'], ['Optimizado', 'opt']].map(([n, w]) => { const m = C.calMap(st, cur.col, w); return { n, g: C.gapStats(st, cur.col, m), r: C.checkRules(st, cur.col, m) }; });
+      const row = (l, f) => `<tr><th scope="row">${l}</th>${vs.map((v) => `<td class="num">${f(v)}</td>`).join('')}</tr>`;
+      tabla = `<table class="tbl"><thead><tr><th></th>${vs.map((v) => `<th>${v.n}</th>`).join('')}</tr></thead><tbody>
+        ${row('Día en que más sobra gente', (v) => v.g.maxSobra)}${row('Días con 20 o más de sobra', (v) => v.g.ge20)}
+        ${row('Días que sobra gente', (v) => v.g.diasSobra)}${row('Días que falta gente', (v) => v.g.diasFalta)}
+        ${row('Día en que más falta', (v) => v.g.maxFalta)}
+        ${row('Grupos que incumplen alguna regla', (v) => `${v.r.gruposConFallos} de ${v.r.grupos}`)}
+        ${row('Días de trabajo por grupo', (v) => `${v.r.trabajo[0]}-${v.r.trabajo[1]}`)}${row('Máx. días seguidos de trabajo', (v) => v.r.maxRun)}
+        ${row('Mín. descansos en 14 días', (v) => v.r.min14)}${row('Franqueos sueltos de 1 día', (v) => v.r.singles)}</tbody></table>`;
+    }
+    return `<h3>Optimización: el mejor calendario para la empresa</h3>
+      <p class="hint">Busca el calendario que menos sobra y falta cada día cumpliendo las mismas reglas (205/160, máx. 6 seguidos, 3 descansos cada 14 días, vacaciones y festivos). Puede alejarse más de la rotación original que el ajuste. En la app es una búsqueda aproximada; la plantilla puede traer una solución exacta calculada aparte (hoja "Optimizado").</p>
+      ${tabla}<p class="hint"><button type="button" class="btn" id="optGo">Calcular optimización de ${h(cur.col)}</button>
+      ${has ? `<button type="button" class="btn primary" id="optUse">Usar el calendario optimizado</button>` : ''}
+      ${pend ? `<button type="button" class="btn" id="optUndo">Volver al calendario anterior</button>` : ''}</p>`;
+  }
   async function doAdjust() {
     const info = st.colectivos.find((c) => c.id === cur.col);
     if (!info.ajuste) { toast('Elige antes el método de ajuste (sencillo o completo)', 'bad'); return; }
@@ -2273,6 +2410,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
         <td class="num">${x.dias}</td>
         <td>${x.peor ? `${C.fmt(x.peor.iso)}: trabajan ${x.peor.trabajan} de ${x.peor.necesarios}` : '—'}</td></tr>`).join('')}</tbody></table>
       ${ajusteHtml()}
+      ${optHtml()}
       ${bolsaHtml()}
       ${worst.length ? `<h3>Días con más falta</h3><ul class="worst">${worst.map((d) => `<li><b>${WD[C.weekday(d.iso)]} ${C.fmt(d.iso)}</b> faltan ${-d.diff} (trabajan ${d.trabajan} de ${d.necesarios})</li>`).join('')}</ul>` : ''}</section>`;
     bindBolsa();
@@ -2287,6 +2425,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     const saveMet = () => { const info = st.colectivos.find((c) => c.id === cur.col); info.ajuste = v.querySelector('#adjMet').value; info.ajusteMax = Math.max(1, parseInt(v.querySelector('#adjMax').value, 10) || (info.ajuste === 'completo' ? 12 : 6)); saveLocal(); };
     const am = v.querySelector('#adjMet'); if (am) { am.onchange = () => { saveMet(); const mx = v.querySelector('#adjMax'); if (mx) { mx.value = am.value === 'completo' ? 12 : 6; saveMet(); } }; v.querySelector('#adjMax').onchange = saveMet; }
     const un = v.querySelector('#adjUndo'); if (un) un.onclick = () => { const n = C.revertAdjust(st, cur.col); saveLocal(); render(); toast(`Ajuste deshecho (${n} cambios)`, 'ok'); };
+    const og = v.querySelector('#optGo'); if (og) og.onclick = async () => { busy(`Optimizando ${cur.col}…`); await tick(); try { C.optimizeCopy(st, cur.col, {}); saveLocal(); renderCoverage(); toast('Optimización calculada. Compárala y, si te sirve, úsala.', 'ok'); } catch (e) { console.error(e); toast(`No se ha podido optimizar: ${e.message}`, 'bad'); } finally { busy(); } };
+    const ou = v.querySelector('#optUse'); if (ou) ou.onclick = () => { C.applyOpt(st, cur.col); saveLocal(); render(); toast('Calendario optimizado aplicado. Puedes volver al anterior.', 'ok'); };
+    const od = v.querySelector('#optUndo'); if (od) od.onclick = () => { C.revertOpt(st, cur.col); saveLocal(); render(); toast('Calendario anterior recuperado', 'ok'); };
     const f = $('#fileEmp'); if (f) f.onchange = () => { importEmp(f.files[0]); f.value = ''; };
   }
 
